@@ -328,19 +328,20 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
 }
 
 fn build_light_glyph_vertices() -> Vec<Vertex> {
-    // Radial point-light icon: small octagonal core + 8 symmetric rays in
-    // the horizontal plane. Lines only, built once at startup.
+    // Radial point-light icon: small octagonal core + symmetric rays.
+    // The 8 horizontal rays read from above; the two vertical rays keep
+    // the starburst recognizable from side angles. Lines only, built once.
     let center = DEFAULT_LIGHT_POSITION;
     let color = glam::Vec3::new(1.0, 0.85, 0.25);
-    let ring_radius = 0.16;
-    let ray_inner = 0.27;
-    let ray_outer = 0.55;
+    let ring_radius = 0.22;
+    let ray_inner = 0.36;
+    let ray_outer = 0.80;
     let mut ring = [glam::Vec3::ZERO; 8];
     for (index, slot) in ring.iter_mut().enumerate() {
         let angle = index as f32 * std::f32::consts::FRAC_PI_4;
         *slot = center + glam::Vec3::new(angle.cos(), angle.sin(), 0.0) * ring_radius;
     }
-    let mut out = Vec::with_capacity(32);
+    let mut out = Vec::with_capacity(36);
     for (index, start) in ring.iter().enumerate() {
         let angle = index as f32 * std::f32::consts::FRAC_PI_4;
         let direction = glam::Vec3::new(angle.cos(), angle.sin(), 0.0);
@@ -352,6 +353,18 @@ fn build_light_glyph_vertices() -> Vec<Vertex> {
             color,
         );
     }
+    push_line(
+        &mut out,
+        center + glam::Vec3::Z * ray_inner,
+        center + glam::Vec3::Z * ray_outer,
+        color,
+    );
+    push_line(
+        &mut out,
+        center - glam::Vec3::Z * ray_inner,
+        center - glam::Vec3::Z * ray_outer,
+        color,
+    );
     out
 }
 
