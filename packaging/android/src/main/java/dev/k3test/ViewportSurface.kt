@@ -136,7 +136,7 @@ internal class ViewportSurface(
         val active = activePointers()
         if (active.size == 1) {
             val (id, point) = active[0]
-            if (singleId != id || lastSingleX == 0f) {
+            if (singleId != id) {
                 singleId = id
                 lastSingleX = point.first
                 lastSingleY = point.second

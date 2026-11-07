@@ -122,8 +122,10 @@ impl CameraRig {
     }
 
     fn orbit(&mut self, dx: f32, dy: f32) {
-        self.yaw -= dx * 0.005;
-        self.pitch = (self.pitch + dy * 0.005).clamp(-1.45, 1.45);
+        // Blender-style damped orbit: ~0.003 rad/px keeps a full-screen drag
+        // near ~180 degrees instead of spinning multiple turns.
+        self.yaw -= dx * 0.003;
+        self.pitch = (self.pitch + dy * 0.003).clamp(-1.45, 1.45);
     }
 
     fn pan(&mut self, dx: f32, dy: f32, size: (u32, u32)) {
@@ -139,7 +141,9 @@ impl CameraRig {
 
     fn zoom(&mut self, scale: f32) {
         if scale > 0.0 {
-            self.distance = (self.distance * scale).clamp(2.0, 60.0);
+            // Keep the eye outside the 2 m default cube (bounding sphere
+            // ~1.74 m) so pinch-zoom can never end up inside it.
+            self.distance = (self.distance * scale).clamp(3.0, 60.0);
         }
     }
 
@@ -167,15 +171,10 @@ impl CameraRig {
     }
 }
 
-fn perspective_matrix(aspect: f32, fov_y: f32, near: f32, far: f32) -> glam::Mat4 {
-    let focal = 1.0 / (fov_y * 0.5).tan();
-    glam::Mat4::from_cols(
-        glam::Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
-        glam::Vec4::new(0.0, focal, 0.0, 0.0),
-        glam::Vec4::new(0.0, 0.0, far / (far - near), -1.0),
-        glam::Vec4::new(0.0, 0.0, far * near / (far - near), 0.0),
-    )
-}
+// Projection/view math comes from glam (standard right-handed look_at with
+// [0,1] depth for Vulkan/WebGPU), matching Blender's Z-up orbit model.
+// Do not hand-roll these again: the previous custom matrix had both depth
+// signs flipped, which clipped every fragment and left a flat clear color.
 
 fn push_line(out: &mut Vec<Vertex>, a: glam::Vec3, b: glam::Vec3, color: glam::Vec3) {
     out.push(Vertex::new(a, color));
@@ -860,7 +859,8 @@ impl Renderer {
 
     fn update_uniform(&self, camera: CameraRig, aspect: f32) {
         let view = camera.view_matrix();
-        let projection = perspective_matrix(aspect, VIEW_FOV_Y, VIEW_NEAR, VIEW_FAR);
+        let projection =
+            glam::Mat4::perspective_rh(VIEW_FOV_Y, aspect, VIEW_NEAR, VIEW_FAR);
         let view_proj = projection * view;
         let columns = view_proj.to_cols_array_2d();
         let mut flat = [0_f32; 32];
