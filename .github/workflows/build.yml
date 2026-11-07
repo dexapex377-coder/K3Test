@@ -71,5 +71,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: k3test-debug-apk
-          path: .local/android/**/*.apk
+          path: packaging/android/build/outputs/apk/debug/*.apk
           if-no-files-found: error
