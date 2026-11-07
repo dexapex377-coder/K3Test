@@ -172,8 +172,8 @@ fn perspective_matrix(aspect: f32, fov_y: f32, near: f32, far: f32) -> glam::Mat
     glam::Mat4::from_cols(
         glam::Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
         glam::Vec4::new(0.0, focal, 0.0, 0.0),
-        glam::Vec4::new(0.0, 0.0, far / (far - near), 1.0),
-        glam::Vec4::new(0.0, 0.0, -far * near / (far - near), 0.0),
+        glam::Vec4::new(0.0, 0.0, far / (far - near), -1.0),
+        glam::Vec4::new(0.0, 0.0, far * near / (far - near), 0.0),
     )
 }
 
