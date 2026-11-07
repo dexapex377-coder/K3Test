@@ -37,6 +37,9 @@ use wgpu::util::DeviceExt;
 
 const VERTEX_SHADER: &str = r"
 @group(0) @binding(0) var<uniform> vp: mat4x4<f32>;
+@group(0) @binding(1) var<uniform> light_center: vec4<f32>;
+@group(0) @binding(2) var<uniform> light_right: vec4<f32>;
+@group(0) @binding(3) var<uniform> light_up: vec4<f32>;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -49,6 +52,19 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vp * vec4<f32>(input.position, 1.0);
+    out.color = input.color;
+    return out;
+}
+// Screen-aligned point-light icon, Blender-style: the geometry lives in a
+// local XY plane and is billboarded around `light_center` with the view
+// right/up axes, so it always stands facing the viewer.
+@vertex
+fn vs_light(input: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world = light_center.xyz
+        + light_right.xyz * input.position.x
+        + light_up.xyz * input.position.y;
+    out.clip_position = vp * vec4<f32>(world, 1.0);
     out.color = input.color;
     return out;
 }
@@ -310,68 +326,78 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
     // Body: 0.60 x 0.45 section, 0.90 long, lens at `position`.
     let front = rect(position, 0.30, 0.225);
     let back = rect(position - forward * 0.90, 0.30, 0.225);
-    // Frustum: Blender default 50 mm lens / 36 mm sensor =>
-    // 1.44 x 0.81 half-extents at 4 m along the view direction.
+    // Frustum: Blender draws a rectangular tube (camera_frame), not a
+    // tapered cone: near and far rectangles share the view-frame size
+    // (50 mm lens / 36 mm sensor => 1.44 x 0.81 half-extents).
+    let near_frame = rect(position, 1.44, 0.81);
     let far = rect(position + forward * 4.0, 1.44, 0.81);
 
-    let mut out = Vec::with_capacity(40);
+    let mut out = Vec::with_capacity(54);
     for i in 0..4 {
         // Body outline.
         push_line(&mut out, front[i], front[(i + 1) % 4], color);
         push_line(&mut out, back[i], back[(i + 1) % 4], color);
         push_line(&mut out, front[i], back[i], color);
-        // Frustum: corner spokes + far rectangle.
-        push_line(&mut out, front[i], far[i], color);
+        // Frustum tube: near rectangle, far rectangle, 4 connectors.
+        push_line(&mut out, near_frame[i], near_frame[(i + 1) % 4], color);
         push_line(&mut out, far[i], far[(i + 1) % 4], color);
+        push_line(&mut out, near_frame[i], far[i], color);
     }
+    // Blender camera_tria: small triangle at the lens marking "up".
+    let top_left = position - right * 1.44 + up * 0.81;
+    let top_right = position + right * 1.44 + up * 0.81;
+    push_line(&mut out, top_left, top_right, color);
+    push_line(&mut out, top_right, position, color);
+    push_line(&mut out, position, top_left, color);
     out
 }
 
 fn build_light_glyph_vertices() -> Vec<Vertex> {
-    // Radial point-light icon: small octagonal core + symmetric rays.
-    // The 8 horizontal rays read from above; the two vertical rays keep
-    // the starburst recognizable from side angles. Lines only, built once.
-    let center = DEFAULT_LIGHT_POSITION;
+    // Screen-aligned point-light icon (Blender light_point_lines style):
+    // a small ring + center diamond + 8 symmetric rays, authored in a
+    // local XY plane around the origin and billboarded by `vs_light`
+    // around DEFAULT_LIGHT_POSITION. Lines only, built once at startup.
     let color = glam::Vec3::new(1.0, 0.85, 0.25);
-    let ring_radius = 0.22;
-    let ray_inner = 0.36;
-    let ray_outer = 0.80;
-    let mut ring = [glam::Vec3::ZERO; 8];
+    let ring_radius = 0.30;
+    let diamond_radius = 0.12;
+    let ray_inner = 0.42;
+    let ray_outer = 0.75;
+    let segments = 16;
+    let mut ring = [glam::Vec3::ZERO; segments];
     for (index, slot) in ring.iter_mut().enumerate() {
-        let angle = index as f32 * std::f32::consts::FRAC_PI_4;
-        *slot = center + glam::Vec3::new(angle.cos(), angle.sin(), 0.0) * ring_radius;
+        let angle = index as f32 * std::f32::consts::TAU / segments as f32;
+        *slot = glam::Vec3::new(angle.cos(), angle.sin(), 0.0) * ring_radius;
     }
-    let mut out = Vec::with_capacity(36);
-    for (index, start) in ring.iter().enumerate() {
+    let mut diamond = [glam::Vec3::ZERO; 4];
+    for (index, slot) in diamond.iter_mut().enumerate() {
+        let angle = index as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
+        *slot = glam::Vec3::new(angle.cos(), angle.sin(), 0.0) * diamond_radius;
+    }
+    let mut out = Vec::with_capacity(56);
+    for index in 0..segments {
+        push_line(&mut out, ring[index], ring[(index + 1) % segments], color);
+    }
+    for index in 0..4 {
+        push_line(&mut out, diamond[index], diamond[(index + 1) % 4], color);
+    }
+    for index in 0..8 {
         let angle = index as f32 * std::f32::consts::FRAC_PI_4;
         let direction = glam::Vec3::new(angle.cos(), angle.sin(), 0.0);
-        push_line(&mut out, *start, ring[(index + 1) % 8], color);
         push_line(
             &mut out,
-            center + direction * ray_inner,
-            center + direction * ray_outer,
+            direction * ray_inner,
+            direction * ray_outer,
             color,
         );
     }
-    push_line(
-        &mut out,
-        center + glam::Vec3::Z * ray_inner,
-        center + glam::Vec3::Z * ray_outer,
-        color,
-    );
-    push_line(
-        &mut out,
-        center - glam::Vec3::Z * ray_inner,
-        center - glam::Vec3::Z * ray_outer,
-        color,
-    );
     out
 }
 
 fn build_line_vertices() -> Vec<Vertex> {
+    // World-space lines (grid + camera). The light icon is separate
+    // because it is billboarded in the shader (local XY plane).
     let mut out = build_grid_vertices();
     out.extend(build_camera_glyph_vertices());
-    out.extend(build_light_glyph_vertices());
     out
 }
 
@@ -611,10 +637,12 @@ struct Renderer {
     queue: wgpu::Queue,
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    light_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     triangle_buffer: wgpu::Buffer,
     line_buffer: wgpu::Buffer,
+    light_buffer: wgpu::Buffer,
     depth: wgpu::TextureView,
     adapter_name: String,
     backend: String,
@@ -700,18 +728,50 @@ impl Renderer {
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("K3Test Phase 1 BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
-        let mut uniform_bytes = [0f32; 32];
+        let mut uniform_bytes = [0f32; 28];
         uniform_bytes[0] = 1.0;
         uniform_bytes[5] = 1.0;
         uniform_bytes[10] = 1.0;
@@ -721,13 +781,46 @@ impl Renderer {
             contents: bytemuck::cast_slice(&uniform_bytes),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let uniform_binding = |offset| {
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform,
+                    offset,
+                    size: None,
+                }),
+            }
+        };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("K3Test Phase 1 BG"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
+            entries: &[
+                uniform_binding(0),
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform,
+                        offset: 64,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform,
+                        offset: 80,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform,
+                        offset: 96,
+                        size: None,
+                    }),
+                },
+            ],
         });
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -744,8 +837,14 @@ impl Renderer {
         });
         let lines = build_line_vertices();
         let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test grid/camera/light lines"),
+            label: Some("K3Test grid/camera lines"),
             contents: bytemuck::cast_slice(&lines),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let light = build_light_glyph_vertices();
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test billboard light icon (local XY)"),
+            contents: bytemuck::cast_slice(&light),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
@@ -774,6 +873,7 @@ impl Renderer {
             format: wgpu::TextureFormat,
             topology: wgpu::PrimitiveTopology,
             cull_mode: Option<wgpu::Face>,
+            entry_point: &'static str,
             label: &'static str,
         ) -> wgpu::RenderPipeline {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -781,7 +881,7 @@ impl Renderer {
                 layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(entry_point),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[Some(vertex_layout.clone())],
                 },
@@ -826,6 +926,7 @@ impl Renderer {
             format,
             wgpu::PrimitiveTopology::TriangleList,
             Some(wgpu::Face::Back),
+            "vs_main",
             "K3Test cube triangles",
         );
         let line_pipeline = make_pipeline(
@@ -836,7 +937,19 @@ impl Renderer {
             format,
             wgpu::PrimitiveTopology::LineList,
             None,
-            "K3Test grid and glyphs",
+            "vs_main",
+            "K3Test grid and camera",
+        );
+        let light_pipeline = make_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            &vertex_layout,
+            format,
+            wgpu::PrimitiveTopology::LineList,
+            None,
+            "vs_light",
+            "K3Test billboard light icon",
         );
 
         Ok(Self {
@@ -849,10 +962,12 @@ impl Renderer {
             queue,
             triangle_pipeline,
             line_pipeline,
+            light_pipeline,
             uniform,
             bind_group,
             triangle_buffer,
             line_buffer,
+            light_buffer,
             depth,
             adapter_name: info.name.clone(),
             backend: format!("{:?}", info.backend),
@@ -879,12 +994,20 @@ impl Renderer {
             glam::Mat4::perspective_rh(VIEW_FOV_Y, aspect, VIEW_NEAR, VIEW_FAR);
         let view_proj = projection * view;
         let columns = view_proj.to_cols_array_2d();
-        let mut flat = [0_f32; 32];
+        let mut flat = [0_f32; 28];
         for (column_index, column) in columns.iter().enumerate() {
             for row in 0..4 {
                 flat[column_index * 4 + row] = column[row];
             }
         }
+        // Screen-aligned light icon axes (same convention as look_at_rh).
+        let eye = camera.eye();
+        let forward = (camera.target - eye).normalize();
+        let right = forward.cross(WORLD_UP).normalize();
+        let up = right.cross(forward).normalize();
+        flat[16..19].copy_from_slice(&DEFAULT_LIGHT_POSITION.to_array());
+        flat[20..23].copy_from_slice(&right.to_array());
+        flat[24..27].copy_from_slice(&up.to_array());
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
     }
 
@@ -952,11 +1075,18 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
 
-            // View overlay first: grid, camera frustum and light glyph.
+            // View overlay first: grid + camera, then the billboarded
+            // light icon — all in this same tiled render pass.
             pass.set_pipeline(&self.line_pipeline);
             pass.set_vertex_buffer(0, self.line_buffer.slice(..));
             pass.draw(
                 0..(self.line_buffer.size() / std::mem::size_of::<Vertex>() as u64) as u32,
+                0..1,
+            );
+            pass.set_pipeline(&self.light_pipeline);
+            pass.set_vertex_buffer(0, self.light_buffer.slice(..));
+            pass.draw(
+                0..(self.light_buffer.size() / std::mem::size_of::<Vertex>() as u64) as u32,
                 0..1,
             );
 
