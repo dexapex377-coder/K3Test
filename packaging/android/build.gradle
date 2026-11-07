@@ -1,0 +1,38 @@
+plugins { id 'com.android.application' version '8.11.1' }
+
+android {
+    namespace 'dev.k3test'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'dev.k3test'
+        minSdk 28
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    signingConfigs {
+        debug {
+            storeFile file('../../.local/android/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+    sourceSets.main {
+        java.srcDirs = ['java']
+        manifest.srcFile 'AndroidManifest.xml'
+        jniLibs.srcDirs = ['../../.local/android/gradle-jni']
+        res.srcDirs = ['res']
+    }
+    packaging { jniLibs { useLegacyPackaging = true } }
+}
+layout.buildDirectory = file('../../.local/android/gradle-build')

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="false" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <application android:label="K3Test" android:icon="@drawable/launcher_icon" android:extractNativeLibs="true">
+        <activity android:name="dev.k3test.K3Activity" android:exported="true" android:screenOrientation="sensorLandscape" android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|density|screenLayout">
+            <meta-data android:name="android.app.lib_name" android:value="k3test" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

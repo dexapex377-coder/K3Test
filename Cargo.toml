@@ -1,0 +1,19 @@
+[package]
+name = "k3test"
+version = "0.1.0"
+edition = "2021"
+description = "K3Test — minimal wgpu cube viewport (PowerVR/Mali/Adreno compatible)"
+license = "MIT"
+
+[lib]
+name = "k3test"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "gles", "wgsl", "naga-ir"] }
+pollster = "0.4"
+bytemuck = { version = "1.24", features = ["derive"] }
+log = "0.4"
+android_logger = "0.15"
+glam = "0.30"
