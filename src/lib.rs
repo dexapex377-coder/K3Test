@@ -1,22 +1,25 @@
-//! K3Test spike — Compose/JNI bridge + wgpu 30.
+//! K3Test Phase 1.0 — Android-first wgpu viewport.
 //!
-//! The important part is not the cube. It is the ownership contract:
-//! * Kotlin creates the `SurfaceView` and owns its visible lifetime.
-//! * Rust acquires an `ANativeWindow` with `ANativeWindow_fromSurface`,
-//!   which increments the native reference.
-//! * `wgpu::Surface` is created and destroyed only on the native render
-//!   thread. The Java/Kotlin callbacks never wait for GPU teardown.
-//! * The `wgpu::Surface` is dropped before the retained `ANativeWindow`
-//!   is released, and every acquire is paired with exactly one release.
+//! A small DCC-shaped core, not a desktop Blender port: Kotlin owns the Activity,
+//! SurfaceView and touch gestures; the Rust worker owns scene snapshot, camera,
+//! ANativeWindow, wgpu surface and GPU resources.
+
+//! The ANativeWindow ownership contract is deliberate:
+//! * `ANativeWindow_fromSurface` acquires one native reference.
+//! * The worker owns that reference for the lifetime of its wgpu surface.
+//! * On shutdown the wgpu surface is dropped before the retained
+//!   `NativeWindow`, so `ANativeWindow_release` happens exactly once.
+//! * Kotlin teardown is non-blocking; the worker performs every GPU drop on
+//!   its own render thread.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::c_void,
     ptr::NonNull,
     sync::{
+        atomics::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, OnceLock,
     },
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -33,7 +36,7 @@ use raw_window_handle::{
 use wgpu::util::DeviceExt;
 
 const VERTEX_SHADER: &str = r"
-@group(0) @binding(0) var<uniform> model: mat4x4<f32>;
+@group(0) @binding(0) var<uniform> vp: mat4x4<f32>;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -45,7 +48,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = model * vec4<f32>(input.position, 1.0);
+    out.clip_position = vp * vec4<f32>(input.position, 1.0);
     out.color = input.color;
     return out;
 }
@@ -58,6 +61,14 @@ fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
 }
 ";
 
+const DEFAULT_CAMERA_POSITION: glam::Vec3 =
+    glam::Vec3::new(7.358891, -6.925791, 4.958309);
+const DEFAULT_LIGHT_POSITION: glam::Vec3 = glam::Vec3::new(4.076245, 1.005454, 5.903862);
+const WORLD_UP: glam::Vec3 = glam::Vec3::Z;
+const VIEW_FOV_Y: f32 = 50.0 * std::f32::consts::PI / 180.0;
+const VIEW_NEAR: f32 = 0.1;
+const VIEW_FAR: f32 = 100.0;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -65,44 +76,292 @@ struct Vertex {
     color: [f32; 3],
 }
 
-const CUBE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [-0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [0.5, -0.5, 0.5], color: [0.2, 0.4, 1.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.9, 0.2] },
-    Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 1.0] },
-    Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 1.0, 1.0] },
-    Vertex { position: [0.5, -0.5, 0.5], color: [0.2, 1.0, 1.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 1.0] },
-    Vertex { position: [0.5, -0.5, 0.5], color: [0.2, 1.0, 1.0] },
-    Vertex { position: [-0.5, -0.5, 0.5], color: [0.2, 1.0, 1.0] },
-];
+impl Vertex {
+    fn new(position: glam::Vec3, color: glam::Vec3) -> Self {
+        Self {
+            position: position.to_array(),
+            color: color.to_array(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CameraRig {
+    target: glam::Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+}
+
+impl Default for CameraRig {
+    fn default() -> Self {
+        let position = DEFAULT_CAMERA_POSITION;
+        let distance = position.length();
+        Self {
+            target: glam::Vec3::ZERO,
+            yaw: position.y.atan2(position.x),
+            pitch: position.z.atan2((position.x * position.x + position.y * position.y).sqrt()),
+            distance,
+        }
+    }
+}
+
+impl CameraRig {
+    fn eye(&self) -> glam::Vec3 {
+        let horizontal = self.pitch.cos();
+        let offset = glam::Vec3::new(
+            horizontal * self.yaw.cos(),
+            horizontal * self.yaw.sin(),
+            self.pitch.sin(),
+        ) * self.distance;
+        self.target + offset
+    }
+
+    fn view_matrix(&self) -> glam::Mat4 {
+        glam::Mat4::look_at_rh(self.eye(), self.target, WORLD_UP)
+    }
+
+    fn orbit(&mut self, dx: f32, dy: f32) {
+        self.yaw -= dx * 0.005;
+        self.pitch = (self.pitch + dy * 0.005).clamp(-1.45, 1.45);
+    }
+
+    fn pan(&mut self, dx: f32, dy: f32, size: (u32, u32)) {
+        let eye = self.eye();
+        let forward = (self.target - eye).normalize();
+        let right = forward.cross(WORLD_UP).normalize();
+        let up = right.cross(forward).normalize();
+        let pixels = size.0.min(size.1).max(1) as f32;
+        let world_per_pixel =
+            (2.0 * self.distance * (VIEW_FOV_Y * 0.5).tan()) / pixels;
+        self.target += right * (-dx * world_per_pixel) + up * (dy * world_per_pixel);
+    }
+
+    fn zoom(&mut self, scale: f32) {
+        if scale > 0.0 {
+            self.distance = (self.distance * scale).clamp(2.0, 60.0);
+        }
+    }
+
+    fn frame_all(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CameraCommand {
+    Orbit { dx: f32, dy: f32 },
+    Pan { dx: f32, dy: f32 },
+    Zoom { scale: f32 },
+    FrameAll,
+}
+
+impl CameraRig {
+    fn apply(&mut self, command: CameraCommand, size: (u32, u32)) {
+        match command {
+            CameraCommand::Orbit { dx, dy } => self.orbit(dx, dy),
+            CameraCommand::Pan { dx, dy } => self.pan(dx, dy, size),
+            CameraCommand::Zoom { scale } => self.zoom(scale),
+            CameraCommand::FrameAll => self.frame_all(),
+        }
+    }
+}
+
+fn perspective_matrix(aspect: f32, fov_y: f32, near: f32, far: f32) -> glam::Mat4 {
+    let focal = 1.0 / (fov_y * 0.5).tan();
+    glam::Mat4::from_cols(
+        glam::Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, focal, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, far / (far - near), 1.0),
+        glam::Vec4::new(0.0, 0.0, -far * near / (far - near), 0.0),
+    )
+}
+
+fn push_line(out: &mut Vec<Vertex>, a: glam::Vec3, b: glam::Vec3, color: glam::Vec3) {
+    out.push(Vertex::new(a, color));
+    out.push(Vertex::new(b, color));
+}
+
+fn push_box_edges(
+    out: &mut Vec<Vertex>,
+    center: glam::Vec3,
+    right: glam::Vec3,
+    up: glam::Vec3,
+    half_right: f32,
+    half_up: f32,
+    color: glam::Vec3,
+) {
+    let corners = [
+        center - right * half_right - up * half_up,
+        center + right * half_right - up * half_up,
+        center + right * half_right + up * half_up,
+        center - right * half_right + up * half_up,
+    ];
+    for i in 0..4 {
+        push_line(out, corners[i], corners[(i + 1) % 4], color);
+        let other_center = center + right * half_right * 0.0;
+        let _ = other_center;
+    }
+}
+
+fn build_cube_vertices() -> [Vertex; 36] {
+    let face = |color: glam::Vec3| color;
+    let g = 0.72;
+    let gray = |shade: f32| face(glam::Vec3::splat(g * shade));
+    let mut vertices = [
+        // front/back/right/left/top/bottom, each two triangles
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, 1.0), gray(1.0)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, -1.0), gray(0.42)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, -1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, -1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, -1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(0.62)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, 1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, 1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, -1.0), gray(0.78)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, -1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, 1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(-1.0, 1.0, -1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, 1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(1.0, 1.0, -1.0), gray(1.12)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.32)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, -1.0), gray(0.32)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(0.32)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, -1.0), gray(0.32)),
+        Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(0.32)),
+        Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(0.32)),
+    ];
+    for vertex in &mut vertices {
+        vertex.color = vertex.color.clamp(glam::Vec3::ZERO, glam::Vec3::splat(1.0));
+    }
+    vertices
+}
+
+fn build_grid_vertices() -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(84);
+    let gray = glam::Vec3::splat(0.22);
+    let major = glam::Vec3::splat(0.34);
+    let x_axis = glam::Vec3::new(0.8, 0.2, 0.2);
+    let y_axis = glam::Vec3::new(0.2, 0.8, 0.2);
+    for i in -10..=10 {
+        let coordinate = i as f32;
+        let x_color = if i == 0 {
+            x_axis
+        } else if i % 5 == 0 {
+            major
+        } else {
+            gray
+        };
+        let y_color = if i == 0 {
+            y_axis
+        } else if i % 5 == 0 {
+            major
+        } else {
+            gray
+        };
+        push_line(
+            &mut out,
+            glam::Vec3::new(coordinate, -10.0, 0.0),
+            glam::Vec3::new(coordinate, 10.0, 0.0),
+            x_color,
+        );
+        push_line(
+            &mut out,
+            glam::Vec3::new(-10.0, coordinate, 0.0),
+            glam::Vec3::new(10.0, coordinate, 0.0),
+            y_color,
+        );
+    }
+    out
+}
+
+fn build_camera_glyph_vertices() -> Vec<Vertex> {
+    let position = DEFAULT_CAMERA_POSITION;
+    let forward = (glam::Vec3::ZERO - position).normalize();
+    let right = forward.cross(WORLD_UP).normalize();
+    let up = right.cross(forward).normalize();
+    let near_center = position + forward * 1.0;
+    let far_center = position + forward * 4.0;
+    let near_right = right * 0.50;
+    let near_up = up * 0.34;
+    let far_right = right * 1.90;
+    let far_up = up * 1.28;
+    let near = [
+        near_center - near_right - near_up,
+        near_center + near_right - near_up,
+        near_center + near_right + near_up,
+        near_center - near_right + near_up,
+    ];
+    let far = [
+        far_center - far_right - far_up,
+        far_center + far_right - far_up,
+        far_center + far_right + far_up,
+        far_center - far_right + far_up,
+    ];
+    let color = glam::Vec3::new(0.45, 0.9, 1.0);
+    let mut out = Vec::with_capacity(48);
+    for i in 0..4 {
+        push_line(&mut out, near[i], near[(i + 1) % 4], color);
+        push_line(&mut out, far[i], far[(i + 1) % 4], color);
+        push_line(&mut out, near[i], far[i], color);
+    }
+    out
+}
+
+fn build_light_glyph_vertices() -> Vec<Vertex> {
+    let center = DEFAULT_LIGHT_POSITION;
+    let radius = 0.45;
+    let color = glam::Vec3::new(1.0, 0.85, 0.25);
+    let directions = [
+        glam::Vec3::X,
+        glam::Vec3::Y,
+        glam::Vec3::Z,
+        -glam::Vec3::X,
+        -glam::Vec3::Y,
+        -glam::Vec3::Z,
+    ];
+    let mut out = Vec::with_capacity(48);
+    for direction in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
+        push_line(
+            &mut out,
+            center + direction * radius,
+            center - direction * radius,
+            color,
+        );
+    }
+    for axis in directions {
+        push_line(
+            &mut out,
+            center + axis * radius * 1.15,
+            center + axis * radius * 1.55,
+            color,
+        );
+    }
+    out
+}
+
+fn build_line_vertices() -> Vec<Vertex> {
+    let mut out = build_grid_vertices();
+    out.extend(build_camera_glyph_vertices());
+    out.extend(build_light_glyph_vertices());
+    out
+}
 
 type EngineHandle = u64;
 
@@ -184,7 +443,7 @@ struct EngineStatus {
     backend: String,
     format: String,
     present: String,
-    frame_ms: f32,
+    camera: String,
 }
 
 impl EngineStatus {
@@ -199,7 +458,7 @@ impl EngineStatus {
             backend: String::new(),
             format: String::new(),
             present: String::new(),
-            frame_ms: 0.0,
+            camera: String::new(),
         }
     }
 }
@@ -209,6 +468,8 @@ struct WorkerState {
     frame_pending: bool,
     resize_pending: Option<(u32, u32)>,
     shutdown: bool,
+    camera: CameraRig,
+    camera_commands: VecDeque<CameraCommand>,
 }
 
 struct EngineSlot {
@@ -219,31 +480,34 @@ struct EngineSlot {
 struct Shared {
     state: Mutex<WorkerState>,
     ready: Condvar,
-    frame_requested: AtomicBool,
 }
 
 impl Shared {
-    fn new(id: EngineHandle) -> Self {
+    fn new(id: EngineHandle, size: (u32, u32)) -> Self {
+        let mut status = EngineStatus::initializing(id);
+        status.size = size;
         Self {
             state: Mutex::new(WorkerState {
-                status: EngineStatus::initializing(id),
+                status,
                 frame_pending: false,
                 resize_pending: None,
                 shutdown: false,
+                camera: CameraRig::default(),
+                camera_commands: VecDeque::new(),
             }),
             ready: Condvar::new(),
-            frame_requested: AtomicBool::new(false),
         }
     }
 
     fn request_frame(&self) -> bool {
-        if self.frame_requested.swap(true, Ordering::AcqRel) {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
             return false;
         }
-        let mut state = self.state.lock().expect("engine state mutex");
+        let already_pending = state.frame_pending;
         state.frame_pending = true;
         self.ready.notify_one();
-        true
+        !already_pending
     }
 
     fn request_resize(&self, width: u32, height: u32) -> bool {
@@ -255,8 +519,39 @@ impl Shared {
             return false;
         }
         state.resize_pending = Some((width, height));
+        state.frame_pending = true;
         self.ready.notify_one();
         true
+    }
+
+    fn request_camera_command(&self, command: CameraCommand) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return false;
+        }
+        state.camera_commands.push_back(command);
+        state.frame_pending = true;
+        self.ready.notify_one();
+        true
+    }
+
+    fn request_orbit(&self, dx: f32, dy: f32) -> bool {
+        self.request_camera_command(CameraCommand::Orbit { dx, dy })
+    }
+
+    fn request_pan(&self, dx: f32, dy: f32) -> bool {
+        self.request_camera_command(CameraCommand::Pan { dx, dy })
+    }
+
+    fn request_zoom(&self, scale: f32) -> bool {
+        if !(scale > 0.0) {
+            return false;
+        }
+        self.request_camera_command(CameraCommand::Zoom { scale })
+    }
+
+    fn request_frame_all(&self) -> bool {
+        self.request_camera_command(CameraCommand::FrameAll)
     }
 
     fn request_shutdown(&self) {
@@ -264,6 +559,7 @@ impl Shared {
         state.shutdown = true;
         state.frame_pending = false;
         state.resize_pending = None;
+        state.camera_commands.clear();
         self.ready.notify_all();
     }
 
@@ -301,10 +597,12 @@ struct Renderer {
     context: SurfaceContext,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
+    triangle_pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
+    triangle_buffer: wgpu::Buffer,
+    line_buffer: wgpu::Buffer,
     depth: wgpu::TextureView,
     adapter_name: String,
     backend: String,
@@ -335,7 +633,7 @@ impl Renderer {
 
         let info = adapter.get_info();
         log::info!(
-            "K3Test bridge adapter={} backend={:?} driver={:?}",
+            "K3Test phase1 adapter={} backend={:?} driver={:?}",
             info.name, info.backend, info.driver
         );
 
@@ -385,11 +683,11 @@ impl Renderer {
         let depth = create_depth_view(&device, size);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("K3Test bridge shader"),
+            label: Some("K3Test Phase 1 viewport shader"),
             source: wgpu::ShaderSource::Wgsl(format!("{VERTEX_SHADER}\n{FRAGMENT_SHADER}").into()),
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("K3Test bridge BGL"),
+            label: Some("K3Test Phase 1 BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -401,13 +699,18 @@ impl Renderer {
                 count: None,
             }],
         });
+        let mut uniform_bytes = [0f32; 32];
+        uniform_bytes[0] = 1.0;
+        uniform_bytes[5] = 1.0;
+        uniform_bytes[10] = 1.0;
+        uniform_bytes[15] = 1.0;
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test bridge uniform"),
-            contents: bytemuck::cast_slice(&[0f32; 64]),
+            label: Some("K3Test Phase 1 uniform"),
+            contents: bytemuck::cast_slice(&uniform_bytes),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("K3Test bridge BG"),
+            label: Some("K3Test Phase 1 BG"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -416,71 +719,113 @@ impl Renderer {
         });
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("K3Test bridge pipeline layout"),
+                label: Some("K3Test Phase 1 pipeline layout"),
                 bind_group_layouts: &[Some(&bind_group_layout)],
                 ..Default::default()
             });
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test bridge cube"),
-            contents: bytemuck::cast_slice(CUBE_VERTICES),
+
+        let cube = build_cube_vertices();
+        let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test cube (2 m)"),
+            contents: bytemuck::cast_slice(&cube),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let lines = build_line_vertices();
+        let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test grid/camera/light lines"),
+            contents: bytemuck::cast_slice(&lines),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("K3Test bridge pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 3 * 4,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                front_face: wgpu::FrontFace::Ccw,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 3 * 4,
+                    shader_location: 1,
+                },
+            ],
+        };
+
+        fn make_pipeline(
+            device: &wgpu::Device,
+            shader: &wgpu::ShaderModule<'_>,
+            layout: &wgpu::PipelineLayout<'_>,
+            vertex_layout: &wgpu::VertexBufferLayout<'_>,
+            format: wgpu::TextureFormat,
+            topology: wgpu::PrimitiveTopology,
+            cull_mode: Option<wgpu::Face>,
+            label: &'static str,
+        ) -> wgpu::RenderPipeline {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(*vertex_layout)],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    cull_mode,
+                    front_face: wgpu::FrontFace::Ccw,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24Plus,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        }
+
+        let triangle_pipeline = make_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            &vertex_layout,
+            format,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::Face::Back),
+            "K3Test cube triangles",
+        );
+        let line_pipeline = make_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            &vertex_layout,
+            format,
+            wgpu::PrimitiveTopology::LineList,
+            None,
+            "K3Test grid and glyphs",
+        );
 
         Ok(Self {
             context: SurfaceContext {
@@ -490,10 +835,12 @@ impl Renderer {
             },
             device,
             queue,
-            pipeline,
+            triangle_pipeline,
+            line_pipeline,
             uniform,
             bind_group,
-            vertex_buffer,
+            triangle_buffer,
+            line_buffer,
             depth,
             adapter_name: info.name.clone(),
             backend: format!("{:?}", info.backend),
@@ -514,7 +861,21 @@ impl Renderer {
         self.depth = create_depth_view(&self.device, (width, height));
     }
 
-    fn render(&mut self, frame_index: u64) -> Result<(), String> {
+    fn update_uniform(&self, camera: CameraRig, aspect: f32) {
+        let view = camera.view_matrix();
+        let projection = perspective_matrix(aspect, VIEW_FOV_Y, VIEW_NEAR, VIEW_FAR);
+        let view_proj = projection * view;
+        let columns = view_proj.to_cols_array_2d();
+        let mut flat = [0_f32; 32];
+        for (column_index, column) in columns.iter().enumerate() {
+            for row in 0..4 {
+                flat[column_index * 4 + row] = column[row];
+            }
+        }
+        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
+    }
+
+    fn render(&mut self, camera: CameraRig) -> Result<(), String> {
         let started = Instant::now();
         let frame = match self.context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -528,36 +889,28 @@ impl Renderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(" surface lost".to_string());
+                return Err("surface lost".to_string());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err("swapchain validation error".to_string());
             }
         };
 
-        let angle = frame_index as f32 * 0.01;
-        let model = glam::Mat4::from_rotation_y(angle)
-            * glam::Mat4::from_rotation_x(angle * 0.6);
-        let matrix = model.to_cols_array_2d();
-        let flat = [
-            matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
-            matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
-            matrix[2][0], matrix[2][1], matrix[2][2], matrix[2][3],
-            matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3],
-        ];
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
+        let width = self.context.config.width.max(1) as f32;
+        let height = self.context.config.height.max(1) as f32;
+        self.update_uniform(camera, width / height);
 
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
-                label: Some("K3Test frame encoder"),
+                label: Some("K3Test Phase 1 frame encoder"),
             },
         );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("K3Test frame pass"),
+                label: Some("K3Test Phase 1 frame pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -584,10 +937,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..CUBE_VERTICES.len() as u32, 0..1);
+
+            // View overlay first: grid, camera frustum and light glyph.
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_vertex_buffer(0, self.line_buffer.slice(..));
+            pass.draw(
+                0..(self.line_buffer.size() / std::mem::size_of::<Vertex>() as u64) as u32,
+                0..1,
+            );
+
+            // Object triangles last, in the same tiled render pass.
+            pass.set_pipeline(&self.triangle_pipeline);
+            pass.set_vertex_buffer(0, self.triangle_buffer.slice(..));
+            pass.draw(0..36, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
@@ -617,16 +980,14 @@ fn create_depth_view(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureVi
 
 fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
     let mut renderer: Option<Renderer> = None;
-    let mut frame_index: u64 = 0;
     let mut fps_frames: u64 = 0;
     let mut last_fps = Instant::now();
     let mut last_status = Instant::now();
 
     let initial_size = owner.size();
     {
-        let mut state = shared.state.lock().expect("engine state mutex");
+        let state = shared.state.lock().expect("engine state mutex");
         if state.shutdown {
-            // `owner` is still borrowed here; it is released after this scope.
             drop(owner);
             return;
         }
@@ -654,7 +1015,7 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
             let mut state = shared.state.lock().expect("engine state mutex");
             state.status.state = "error";
             state.status.detail = error.clone();
-            log::error!("K3Test bridge initialization failed: {error}");
+            log::error!("K3Test Phase 1 initialization failed: {error}");
             return;
         }
     }
@@ -665,7 +1026,11 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
             if state.shutdown {
                 break;
             }
-            while !state.frame_pending && state.resize_pending.is_none() && !state.shutdown {
+            while !state.frame_pending
+                && state.resize_pending.is_none()
+                && state.camera_commands.is_empty()
+                && !state.shutdown
+            {
                 state = shared
                     .ready
                     .wait(state)
@@ -674,11 +1039,14 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
             if state.shutdown {
                 break;
             }
-            (state.resize_pending.take(), state.frame_pending, state.shutdown)
+            let resize = state.resize_pending.take();
+            let frame_pending = state.frame_pending;
+            state.frame_pending = false;
+            let commands: Vec<CameraCommand> = state.camera_commands.drain(..).collect();
+            (resize, frame_pending, commands, state.camera)
         };
-        shared.frame_requested.store(false, Ordering::Release);
 
-        let (resize, frame_pending, _) = action;
+        let (resize, frame_pending, commands, mut camera) = action;
         if let Some((width, height)) = resize {
             if let Some(current) = renderer.as_mut() {
                 current.resize(width, height);
@@ -686,14 +1054,31 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
                 state.status.size = (width, height);
             }
         }
+
+        for command in commands {
+            let size = renderer
+                .as_ref()
+                .map(|current| {
+                    (
+                        current.context.config.width,
+                        current.context.config.height,
+                    )
+                })
+                .unwrap_or((1, 1));
+            camera.apply(command, size);
+        }
+        {
+            let mut state = shared.state.lock().expect("engine state mutex");
+            state.camera = camera;
+        }
+
         if !frame_pending {
             continue;
         }
-        frame_index += 1;
         let Some(current) = renderer.as_mut() else {
             continue;
         };
-        match current.render(frame_index) {
+        match current.render(camera) {
             Ok(()) => {
                 fps_frames += 1;
                 let mut state = shared.state.lock().expect("engine state mutex");
@@ -708,7 +1093,7 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
                 if last_status.elapsed() >= Duration::from_secs(2) {
                     last_status = Instant::now();
                     log::info!(
-                        "K3Test bridge running backend={} fps={:.1}",
+                        "K3Test Phase 1 running backend={} fps={:.1}",
                         current.backend,
                         state.status.fps
                     );
@@ -722,16 +1107,16 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
         }
     }
 
-    // Drop the GPU resources, then the surface, then the ANativeWindow.
+    // Drop GPU resources, then wgpu surface, then ANativeWindow on this thread.
     drop(renderer);
 }
 
 fn init_logging() {
     let logger = android_logger::Config::default()
         .with_max_level(log::LevelFilter::Info)
-        .with_tag("K3TestBridge");
+        .with_tag("K3TestPhase1");
     android_logger::init_once(logger);
-    log::info!("K3Test bridge logging ready");
+    log::info!("K3Test Phase 1 logging ready");
 }
 
 fn jni_string(env: &mut JNIEnv<'_>, value: &str) -> jstring {
@@ -748,16 +1133,16 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeCreate(
 ) -> jlong {
     init_logging();
     if surface.is_null() {
-        log::error!("K3Test bridge nativeCreate called with a null Surface");
+        log::error!("K3Test Phase 1 nativeCreate called with a null Surface");
         return 0;
     }
     let Some(window) = (unsafe { NativeWindow::from_surface(env, surface) }) else {
-        log::error!("K3Test bridge could not acquire ANativeWindow");
+        log::error!("K3Test Phase 1 could not acquire ANativeWindow");
         return 0;
     };
 
     let id = NEXT_ENGINE.fetch_add(1, Ordering::Relaxed);
-    let shared = Arc::new(Shared::new(id));
+    let shared = Arc::new(Shared::new(id, window.size()));
     let slot = Arc::new(EngineSlot {
         id,
         shared: Arc::clone(&shared),
@@ -774,7 +1159,7 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeCreate(
             render_worker(thread_shared, window);
         }) {
         Ok(_) => {
-            log::info!("K3Test bridge engine {id} worker started");
+            log::info!("K3Test Phase 1 engine {id} worker started");
             id as jlong
         }
         Err(error) => {
@@ -782,7 +1167,7 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeCreate(
                 .lock()
                 .expect("engine registry mutex")
                 .remove(&id);
-            log::error!("K3Test bridge render thread spawn failed: {error}");
+            log::error!("K3Test Phase 1 render thread spawn failed: {error}");
             0
         }
     }
@@ -829,6 +1214,59 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeFrame(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeOrbit(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    dx: jni::sys::jfloat,
+    dy: jni::sys::jfloat,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_orbit(dx, dy) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativePan(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    dx: jni::sys::jfloat,
+    dy: jni::sys::jfloat,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_pan(dx, dy) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeZoom(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    scale: jni::sys::jfloat,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_zoom(scale) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeFrameAll(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_frame_all() { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_dev_k3test_NativeBridge_nativeDestroy(
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -849,7 +1287,7 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeDestroy(
     // Non-blocking teardown. The render worker performs the ordered cleanup
     // on its own thread; the UI thread is never joined here.
     engine.shared.request_shutdown();
-    log::info!("K3Test bridge engine {id} shutdown requested");
+    log::info!("K3Test Phase 1 engine {id} shutdown requested");
     1
 }
 

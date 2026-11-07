@@ -2,7 +2,7 @@
 name = "k3test"
 version = "0.1.0"
 edition = "2021"
-description = "K3Test — minimal wgpu cube viewport (PowerVR/Mali/Adreno compatible)"
+description = "K3Test — Phase 1.0 mobile-first wgpu viewport (PowerVR/Mali/Adreno)"
 license = "MIT"
 
 [lib]
@@ -17,5 +17,5 @@ raw-window-handle = "0.6"
 pollster = "0.4"
 bytemuck = { version = "1.24", features = ["derive"] }
 log = "0.4"
-android_logger = "0.15"
+android_logger = { version = "0.15", default-features = false }
 glam = "0.30"

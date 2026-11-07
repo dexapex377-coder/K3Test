@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
 private fun ViewportScreen() {
     var handle by remember { mutableStateOf(0L) }
     var status by remember { mutableStateOf("starting") }
-    var autoFrame by remember { mutableStateOf(true) }
+    var autoFrame by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -56,7 +56,8 @@ private fun ViewportScreen() {
         )
 
         Column(modifier = Modifier.padding(12.dp)) {
-            BasicText(text = "K3Test bridge spike", style = TextStyle(color = Color.White))
+            BasicText(text = "K3Test Phase 1.0 viewport", style = TextStyle(color = Color.White))
+            BasicText(text = "1-finger orbit  -  2-finger pan/pinch", style = TextStyle(color = Color.White))
             BasicText(text = status, style = TextStyle(color = Color.White))
             Row(modifier = Modifier.padding(top = 8.dp)) {
                 BasicText(
@@ -69,6 +70,13 @@ private fun ViewportScreen() {
                     style = TextStyle(color = Color.Cyan),
                     modifier = Modifier.clickable {
                         if (handle != 0L) NativeBridge.nativeFrame(handle)
+                    }
+                )
+                BasicText(
+                    text = "  Frame all",
+                    style = TextStyle(color = Color.Cyan),
+                    modifier = Modifier.clickable {
+                        if (handle != 0L) NativeBridge.nativeFrameAll(handle)
                     }
                 )
             }

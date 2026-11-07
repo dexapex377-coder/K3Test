@@ -14,6 +14,10 @@ internal object NativeBridge {
     external fun nativeCreate(surface: Surface): Long
     external fun nativeResize(handle: Long, width: Int, height: Int): Boolean
     external fun nativeFrame(handle: Long): Boolean
+    external fun nativeOrbit(handle: Long, dx: Float, dy: Float): Boolean
+    external fun nativePan(handle: Long, dx: Float, dy: Float): Boolean
+    external fun nativeZoom(handle: Long, scale: Float): Boolean
+    external fun nativeFrameAll(handle: Long): Boolean
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeInfo(handle: Long): String
 }
