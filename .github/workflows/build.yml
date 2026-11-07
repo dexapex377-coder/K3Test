@@ -63,12 +63,13 @@ jobs:
       - name: Build APK
         run: |
           cd packaging/android
-          gradle assembleDebug --info 2>&1 | tail -30
-          find ../../.local/android -name "*.apk" -o -name "*.so" | head -10
+          gradle assembleDebug --info 2>&1 | tail -60
+          find ../../.local/android -type f \( -name '*.apk' -o -name '*.so' \) -print
+          find . -type f -name '*.apk' -print | head -10
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: k3test-debug-apk
-          path: .local/android/gradle-build/outputs/apk/debug/*.apk
+          path: .local/android/**/*.apk
           if-no-files-found: error
