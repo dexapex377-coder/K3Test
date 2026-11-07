@@ -288,64 +288,67 @@ fn build_grid_vertices() -> Vec<Vertex> {
 }
 
 fn build_camera_glyph_vertices() -> Vec<Vertex> {
+    // Blender-style camera icon: a recognizable rectangular body behind the
+    // lens plus the field-of-view frustum in front. Built once at startup
+    // into the shared line buffer; orientation follows the real camera
+    // transform (position -> origin).
     let position = DEFAULT_CAMERA_POSITION;
     let forward = (glam::Vec3::ZERO - position).normalize();
     let right = forward.cross(WORLD_UP).normalize();
     let up = right.cross(forward).normalize();
-    let near_center = position + forward * 1.0;
-    let far_center = position + forward * 4.0;
-    let near_right = right * 0.50;
-    let near_up = up * 0.34;
-    let far_right = right * 1.90;
-    let far_up = up * 1.28;
-    let near = [
-        near_center - near_right - near_up,
-        near_center + near_right - near_up,
-        near_center + near_right + near_up,
-        near_center - near_right + near_up,
-    ];
-    let far = [
-        far_center - far_right - far_up,
-        far_center + far_right - far_up,
-        far_center + far_right + far_up,
-        far_center - far_right + far_up,
-    ];
     let color = glam::Vec3::new(0.45, 0.9, 1.0);
-    let mut out = Vec::with_capacity(48);
+
+    let rect = |center: glam::Vec3, half_right: f32, half_up: f32| {
+        [
+            center - right * half_right - up * half_up,
+            center + right * half_right - up * half_up,
+            center + right * half_right + up * half_up,
+            center - right * half_right + up * half_up,
+        ]
+    };
+
+    // Body: 0.60 x 0.45 section, 0.90 long, lens at `position`.
+    let front = rect(position, 0.30, 0.225);
+    let back = rect(position - forward * 0.90, 0.30, 0.225);
+    // Frustum: Blender default 50 mm lens / 36 mm sensor =>
+    // 1.44 x 0.81 half-extents at 4 m along the view direction.
+    let far = rect(position + forward * 4.0, 1.44, 0.81);
+
+    let mut out = Vec::with_capacity(40);
     for i in 0..4 {
-        push_line(&mut out, near[i], near[(i + 1) % 4], color);
+        // Body outline.
+        push_line(&mut out, front[i], front[(i + 1) % 4], color);
+        push_line(&mut out, back[i], back[(i + 1) % 4], color);
+        push_line(&mut out, front[i], back[i], color);
+        // Frustum: corner spokes + far rectangle.
+        push_line(&mut out, front[i], far[i], color);
         push_line(&mut out, far[i], far[(i + 1) % 4], color);
-        push_line(&mut out, near[i], far[i], color);
     }
     out
 }
 
 fn build_light_glyph_vertices() -> Vec<Vertex> {
+    // Radial point-light icon: small octagonal core + 8 symmetric rays in
+    // the horizontal plane. Lines only, built once at startup.
     let center = DEFAULT_LIGHT_POSITION;
-    let radius = 0.45;
     let color = glam::Vec3::new(1.0, 0.85, 0.25);
-    let directions = [
-        glam::Vec3::X,
-        glam::Vec3::Y,
-        glam::Vec3::Z,
-        -glam::Vec3::X,
-        -glam::Vec3::Y,
-        -glam::Vec3::Z,
-    ];
-    let mut out = Vec::with_capacity(48);
-    for direction in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
-        push_line(
-            &mut out,
-            center + direction * radius,
-            center - direction * radius,
-            color,
-        );
+    let ring_radius = 0.16;
+    let ray_inner = 0.27;
+    let ray_outer = 0.55;
+    let mut ring = [glam::Vec3::ZERO; 8];
+    for (index, slot) in ring.iter_mut().enumerate() {
+        let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+        *slot = center + glam::Vec3::new(angle.cos(), angle.sin(), 0.0) * ring_radius;
     }
-    for axis in directions {
+    let mut out = Vec::with_capacity(32);
+    for (index, start) in ring.iter().enumerate() {
+        let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+        let direction = glam::Vec3::new(angle.cos(), angle.sin(), 0.0);
+        push_line(&mut out, *start, ring[(index + 1) % 8], color);
         push_line(
             &mut out,
-            center + axis * radius * 1.15,
-            center + axis * radius * 1.55,
+            center + direction * ray_inner,
+            center + direction * ray_outer,
             color,
         );
     }
