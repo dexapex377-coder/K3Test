@@ -188,7 +188,7 @@ impl Renderer {
         instance_desc.backends = wgpu::Backends::all();
         let instance = wgpu::Instance::new(instance_desc);
 
-        let surface = instance.create_surface(window)?;
+        let surface = instance.create_surface(window.clone())?;
         let surface: wgpu::Surface<'static> =
             unsafe { std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface) };
 
@@ -434,7 +434,6 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err("K3Test: swapchain validation".to_string());
             }
-            _ => return Err("K3Test: unknown surface status".to_string()),
         };
         let view = surface_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
