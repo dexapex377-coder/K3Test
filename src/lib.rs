@@ -186,7 +186,7 @@ impl Renderer {
     async fn new(window: Arc<winit::window::Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_desc.backends = wgpu::Backends::all();
-        let instance = wgpu::Instance::new(&instance_desc);
+        let instance = wgpu::Instance::new(instance_desc);
 
         let surface = instance.create_surface(window)?;
         let surface: wgpu::Surface<'static> =
@@ -207,9 +207,9 @@ impl Renderer {
         let info = adapter.get_info();
         log::info!("K3Test: adapter={} backend={:?} driver={:?}", info.name, info.backend, info.driver);
         log::info!(
-            "K3Test: features disponibles: limits.max_buffer_size={} max_storage_buffers={}",
+            "K3Test: features disponibles: limits.max_buffer_size={} max_storage_buffer_binding_size={}",
             adapter.limits().max_buffer_size,
-            adapter.limits().max_storage_buffers
+            adapter.limits().max_storage_buffer_binding_size
         );
 
         let backend = info.backend;
@@ -217,7 +217,7 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default().using_resolution(&adapter),
+                required_limits: adapter.limits(),
                 ..Default::default()
             })
             .await?;
@@ -304,12 +304,12 @@ impl Renderer {
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("K3Test Pipeline"),
-            layout: Some(pipeline_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -324,7 +324,7 @@ impl Renderer {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
