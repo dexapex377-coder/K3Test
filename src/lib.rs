@@ -17,7 +17,7 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     sync::{
-        atomics::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, OnceLock,
     },
     thread,
@@ -247,9 +247,6 @@ fn build_cube_vertices() -> [Vertex; 36] {
         Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(0.32)),
         Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(0.32)),
     ];
-    for vertex in &mut vertices {
-        vertex.color = vertex.color.clamp(glam::Vec3::ZERO, glam::Vec3::splat(1.0));
-    }
     vertices
 }
 
@@ -756,8 +753,8 @@ impl Renderer {
 
         fn make_pipeline(
             device: &wgpu::Device,
-            shader: &wgpu::ShaderModule<'_>,
-            layout: &wgpu::PipelineLayout<'_>,
+            shader: &wgpu::ShaderModule,
+            layout: &wgpu::PipelineLayout,
             vertex_layout: &wgpu::VertexBufferLayout<'_>,
             format: wgpu::TextureFormat,
             topology: wgpu::PrimitiveTopology,
@@ -771,7 +768,7 @@ impl Renderer {
                     module: shader,
                     entry_point: Some("vs_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[Some(*vertex_layout)],
+                    buffers: &[Some(vertex_layout.clone())],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: shader,
