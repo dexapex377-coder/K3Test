@@ -362,7 +362,7 @@ fn build_light_glyph_vertices() -> Vec<Vertex> {
     let diamond_radius = 0.12;
     let ray_inner = 0.42;
     let ray_outer = 0.75;
-    let segments = 16;
+    const segments: usize = 16;
     let mut ring = [glam::Vec3::ZERO; segments];
     for (index, slot) in ring.iter_mut().enumerate() {
         let angle = index as f32 * std::f32::consts::TAU / segments as f32;
