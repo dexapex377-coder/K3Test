@@ -1,41 +1,28 @@
 # K3Test
 
-**Viewport wgpu mínimo** para validar rendering en GPUs móviles (PowerVR / Mali / Adreno).
+**Spike Compose + JNI + wgpu 30.0.1** for validar ANativeWindow, SurfaceView y wgpu en un Motorola g56 (MediaTek mt6855, PowerVR BXM-8-256).
 
 > Nombre provisorio. No es Blender. Cuando el DCC esté estable con las tools y modificadores, se renombra a *Kronos3D Evolution*.
 
-## Qué es
+## Qué demuestra (y qué no)
 
-- **Motor:** Rust, `wgpu 30.0.1` (misma que Starling/Horizon) + `winit 0.30` con `android-native-activity`.
-- **Viewport:** cubo rotando con colores por cara, 1 pipeline forward.
-- **Formato:** `Rgba8Unorm` + `Depth24Stencil8`, **MSAA 1×**, sin HDR, sin compute/storage en el viewport.
-
-Estas reglas vienen de medir el hardware real:
-
-- Motorola g56 5G (MediaTek mt6855, **PowerVR B-Series BXM-8-256**, Vulkan **1.3.1** driver 25.1@6715691).
-- Starling (`dev.horizon.android`) corre Vulkan con `Rgba8Unorm/Mailbox` y features limitadas.
-- TextureCraft pide `Rgba16Float` HDR + compute — eso es lo que no dibuja en este PowerVR.
+- `MainActivity` Compose (ComponentActivity, sin NativeActivity) hostea un SurfaceView vía AndroidView.
+- Kotlin pasa `android.view.Surface` por JNI a Rust.
+- Rust convierte a `ANativeWindow` con `ANativeWindow_fromSurface` (incrementa referencia nativa).
+- El render vive en un hilo nativo dedicado con `wgpu::SurfaceTarget::Window(Box<dyn WindowHandle>)`.
+- Verificable: create → present → resize → destroy de la SurfaceView sin bloquear el UI thread ni liberar dos veces.
+- Reglas PowerVR del spike: superficie sRGB 8-bit, depth 24-bit, MSAA 1×, un solo render pass, sin compute/storage/HDR 16F.
 
 ## Build (CI)
 
-```bash
-# GitHub Actions compila y sube k3test-debug-apk
-# Motorola solo instala/prueba por adb
-```
+GitHub Actions compila `libk3test.so` para `aarch64-linux-android` (Rust 1.9x) y empaqueta con Gradle.
 
 ## Probar en el Motorola
 
 ```bash
 adb -s <IP:PUERTO> install -r app-debug.apk
 adb -s <IP:PUERTO> shell monkey -p dev.k3test -c android.intent.category.LAUNCHER 1
-adb -s <IP:PUERTO> logcat -s K3Test:V
-# Esperado: "adapter=... backend=... " + cubo girando + "fps" cada 2s
+adb -s <IP:PUERTO> logcat -s K3TestBridge:V
 ```
 
-## Plan
-
-- [x] Fase 0: viewport mínimo (este repo) — validar PowerVR.
-- [ ] Fase 1: mesh viewer + transform + edit mode.
-- [ ] Fase 2: modificadores.
-- [ ] Fase 3: texture paint (crates `texel/compose/paint/bake` de TextureCraft).
-- [ ] Fase 4: animación. Fase 5: sculpt.
+El Compose muestra estado de la sesión nativa y frames presentados. La rotación del cubo continua con Choreographer (cada vsync) a través de `nativeFrame`.

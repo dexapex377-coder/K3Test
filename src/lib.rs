@@ -1,23 +1,34 @@
-//! K3Test — viewport wgpu mínimo compatible PowerVR / Mali / Adreno.
+//! K3Test spike — Compose/JNI bridge + wgpu 30.
 //!
-//! Reglas (medidas en el Motorola g56, PowerVR BXM-8-256):
-//! - Superficie `Rgba8Unorm` (8-bit, sin HDR 16F)
-//! - Depth 24-bit (no D32S8)
-//! - MSAA 1× (sin MSAA)
-//! - 1 pipeline forward + 1 blit — cero compute/storage en el viewport
-//! - wgpu 30.0.1 (misma que Starling/Horizon), backend Vulkan primero con
-//!   fallback GLES (OpenGL ES 3.2 en este GPU)
-//!
-//! Si el cubo dibuja acá, la base de rendering está validada para los 3 vendors.
+//! The important part is not the cube. It is the ownership contract:
+//! * Kotlin creates the `SurfaceView` and owns its visible lifetime.
+//! * Rust acquires an `ANativeWindow` with `ANativeWindow_fromSurface`,
+//!   which increments the native reference.
+//! * `wgpu::Surface` is created and destroyed only on the native render
+//!   thread. The Java/Kotlin callbacks never wait for GPU teardown.
+//! * The `wgpu::Surface` is dropped before the retained `ANativeWindow`
+//!   is released, and every acquire is paired with exactly one release.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    ptr::NonNull,
+    sync::{
+        Arc, Condvar, Mutex, OnceLock,
+    },
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant},
+};
 
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp},
-    window::{WindowAttributes, WindowId},
+use jni::{
+    objects::JObject,
+    sys::{jlong, jstring},
+    JNIEnv,
+};
+use raw_window_handle::{
+    AndroidDisplayHandle, AndroidNdkWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
+    HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
 };
 use wgpu::util::DeviceExt;
 
@@ -54,44 +65,37 @@ struct Vertex {
     color: [f32; 3],
 }
 
-// Cubo: 36 vértices (2 por triángulo x 12 tris), colores por cara
 const CUBE_VERTICES: &[Vertex] = &[
-    // front (+Z)
     Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
     Vertex { position: [0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
     Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
     Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.2, 0.2] },
     Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
     Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.2, 0.2] },
-    // back (-Z)
     Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
     Vertex { position: [-0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
     Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
     Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
     Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 1.0, 0.2] },
     Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 1.0, 0.2] },
-    // right (+X)
     Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, -0.5], color: [0.2, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, 0.5], color: [0.2, 0.4, 1.0] },
     Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, 0.5], color: [0.2, 0.4, 1.0] },
     Vertex { position: [0.5, -0.5, 0.5], color: [0.2, 0.4, 1.0] },
-    // left (-X)
     Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.9, 0.2] },
     Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.9, 0.2] },
     Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.9, 0.2] },
     Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.9, 0.2] },
     Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.9, 0.2] },
     Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.9, 0.2] },
-    // top (+Y)
     Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
     Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
     Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, 0.5], color: [1.0, 0.4, 1.0] },
     Vertex { position: [0.5, 0.5, -0.5], color: [1.0, 0.4, 1.0] },
-    // bottom (-Y)
     Vertex { position: [-0.5, -0.5, -0.5], color: [0.2, 1.0, 1.0] },
     Vertex { position: [0.5, -0.5, -0.5], color: [0.2, 1.0, 1.0] },
     Vertex { position: [0.5, -0.5, 0.5], color: [0.2, 1.0, 1.0] },
@@ -100,169 +104,292 @@ const CUBE_VERTICES: &[Vertex] = &[
     Vertex { position: [-0.5, -0.5, 0.5], color: [0.2, 1.0, 1.0] },
 ];
 
-struct App {
-    window: Option<Arc<winit::window::Window>>,
-    renderer: Option<Renderer>,
+type EngineHandle = u64;
+
+#[derive(Debug)]
+struct NativeWindow(NonNull<ndk_sys::ANativeWindow>);
+
+impl NativeWindow {
+    /// SAFETY: the Java surface must be alive for this call and the caller
+    /// transfers the acquired-reference ownership to this wrapper.
+    unsafe fn from_surface(env: JNIEnv<'_>, surface: JObject<'_>) -> Option<Self> {
+        if surface.is_null() {
+            return None;
+        }
+        let raw = ndk_sys::ANativeWindow_fromSurface(env.get_raw(), surface.as_raw())
+            as *mut ndk_sys::ANativeWindow;
+        let ptr = NonNull::new(raw)?;
+        Some(Self(ptr))
+    }
+
+    fn size(&self) -> (u32, u32) {
+        let width = unsafe { ndk_sys::ANativeWindow_getWidth(self.0.as_ptr()) };
+        let height = unsafe { ndk_sys::ANativeWindow_getHeight(self.0.as_ptr()) };
+        (width.max(0) as u32, height.max(0) as u32)
+    }
+
+    fn raw_handle(&self) -> AndroidNdkWindowHandle {
+        AndroidNdkWindowHandle::new(self.0.cast::<c_void>())
+    }
 }
 
-impl App {
-    fn new() -> Self {
-        Self { window: None, renderer: None }
+impl Clone for NativeWindow {
+    fn clone(&self) -> Self {
+        unsafe {
+            ndk_sys::ANativeWindow_acquire(self.0.as_ptr());
+        }
+        Self(self.0)
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            let attrs = WindowAttributes::default().with_title("K3Test");
-            // Permite que wgpu gestione el surface (winit 0.30 en Android).
-            match event_loop.create_window(attrs) {
-                Ok(win) => {
-                    let window = Arc::new(win);
-                    match pollster::block_on(Renderer::new(Arc::clone(&window))) {
-                        Ok(renderer) => {
-                            log::info!("K3Test: renderer listo (backend={:?})", renderer.backend);
-                            self.renderer = Some(renderer);
-                        }
-                        Err(e) => {
-                            log::error!("K3Test: renderer falló: {e}");
-                        }
-                    }
-                    self.window = Some(window);
-                }
-                Err(e) => log::error!("K3Test: ventana falló: {e}"),
-            }
+impl Drop for NativeWindow {
+    fn drop(&mut self) {
+        unsafe {
+            ndk_sys::ANativeWindow_release(self.0.as_ptr());
+        }
+    }
+}
+
+unsafe impl Send for NativeWindow {}
+unsafe impl Sync for NativeWindow {}
+
+impl HasWindowHandle for NativeWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        unsafe {
+            Ok(WindowHandle::borrow_raw(
+                RawWindowHandle::AndroidNdk(self.raw_handle()),
+            ))
+        }
+    }
+}
+
+impl HasDisplayHandle for NativeWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        unsafe {
+            Ok(DisplayHandle::borrow_raw(RawDisplayHandle::Android(
+                AndroidDisplayHandle::new(),
+            )))
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EngineStatus {
+    state: &'static str,
+    detail: String,
+    frames: u64,
+    fps: f32,
+    size: (u32, u32),
+    adapter: String,
+    backend: String,
+    format: String,
+    present: String,
+    frame_ms: f32,
+}
+
+impl EngineStatus {
+    fn initializing(id: u64) -> Self {
+        Self {
+            state: "initializing",
+            detail: format!("engine {id}"),
+            frames: 0,
+            fps: 0.0,
+            size: (0, 0),
+            adapter: String::new(),
+            backend: String::new(),
+            format: String::new(),
+            present: String::new(),
+            frame_ms: 0.0,
+        }
+    }
+}
+
+struct WorkerState {
+    status: EngineStatus,
+    frame_pending: bool,
+    resize_pending: Option<(u32, u32)>,
+    shutdown: bool,
+}
+
+struct EngineSlot {
+    id: EngineHandle,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    state: Mutex<WorkerState>,
+    ready: Condvar,
+    frame_requested: AtomicBool,
+}
+
+impl Shared {
+    fn new(id: EngineHandle) -> Self {
+        Self {
+            state: Mutex::new(WorkerState {
+                status: EngineStatus::initializing(id),
+                frame_pending: false,
+                resize_pending: None,
+                shutdown: false,
+            }),
+            ready: Condvar::new(),
+            frame_requested: AtomicBool::new(false),
         }
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::RedrawRequested => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    // Rotación lenta en Y + leve en X
-                    let angle = renderer.frames as f32 * 0.01;
-                    let model = glam::Mat4::from_rotation_y(angle)
-                        * glam::Mat4::from_rotation_x(angle * 0.6)
-                        * glam::Mat4::from_translation(glam::Vec3::ZERO);
-                    renderer.update_uniform(model.to_cols_array_2d());
-                    if let Err(e) = renderer.render() {
-                        log::error!("K3Test: render error: {e}");
-                    }
-                }
-            }
-            WindowEvent::Resized(size) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(size.width, size.height);
-                }
-            }
-            _ => {}
+    fn request_frame(&self) -> bool {
+        if self.frame_requested.swap(true, Ordering::AcqRel) {
+            return false;
         }
+        let mut state = self.state.lock().expect("engine state mutex");
+        state.frame_pending = true;
+        self.ready.notify_one();
+        true
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+    fn request_resize(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
         }
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return false;
+        }
+        state.resize_pending = Some((width, height));
+        self.ready.notify_one();
+        true
     }
+
+    fn request_shutdown(&self) {
+        let mut state = self.state.lock().expect("engine state mutex");
+        state.shutdown = true;
+        state.frame_pending = false;
+        state.resize_pending = None;
+        self.ready.notify_all();
+    }
+
+    fn snapshot(&self) -> EngineStatus {
+        self.state.lock().expect("engine state mutex").status.clone()
+    }
+}
+
+static ENGINES: OnceLock<Mutex<HashMap<EngineHandle, Arc<EngineSlot>>>> =
+    OnceLock::new();
+static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
+
+fn engines() -> &'static Mutex<HashMap<EngineHandle, Arc<EngineSlot>>> {
+    ENGINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn find_engine(handle: EngineHandle) -> Option<Arc<EngineSlot>> {
+    if handle == 0 {
+        return None;
+    }
+    engines()
+        .lock()
+        .expect("engine registry mutex")
+        .get(&handle)
+        .cloned()
+}
+
+struct SurfaceContext {
+    surface: wgpu::Surface<'static>,
+    owner: NativeWindow,
+    config: wgpu::SurfaceConfiguration,
 }
 
 struct Renderer {
-    backend: wgpu::Backend,
-    surface: wgpu::Surface<'static>,
+    context: SurfaceContext,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    render_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
-    depth_view: wgpu::TextureView,
-    frames: u64,
-    fps_frames: u64,
-    fps_start: std::time::Instant,
+    depth: wgpu::TextureView,
+    adapter_name: String,
+    backend: String,
+    format: String,
+    present: String,
 }
 
 impl Renderer {
-    async fn new(window: Arc<winit::window::Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        instance_desc.backends = wgpu::Backends::all();
-        let instance = wgpu::Instance::new(instance_desc);
+    async fn new(owner: NativeWindow, size: (u32, u32)) -> Result<Self, String> {
+        let mut instance_descriptor =
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(owner.clone()));
+        instance_descriptor.backends = wgpu::Backends::VULKAN;
+        let instance = wgpu::Instance::new(instance_descriptor);
+        let target = wgpu::SurfaceTarget::Window(Box::new(owner.clone()));
+        let surface = instance
+            .create_surface(target)
+            .map_err(|error| format!("wgpu surface creation failed: {error}"))?;
 
-        let surface = instance.create_surface(window.clone())?;
-        let surface: wgpu::Surface<'static> =
-            unsafe { std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface) };
-
-        // Vulkan primero, fallback GLES — igual que Starling en este GPU.
-        let adapter_req = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        };
-        let adapter = match instance.request_adapter(&adapter_req).await {
-            Ok(adapter) => adapter,
-            Err(e) => return Err(format!("K3Test: sin adapter wgpu (¿Vulkan y GLES fallaron?): {e}").into()),
-        };
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| format!("no Vulkan adapter: {error}"))?;
 
         let info = adapter.get_info();
-        log::info!("K3Test: adapter={} backend={:?} driver={:?}", info.name, info.backend, info.driver);
         log::info!(
-            "K3Test: features disponibles: limits.max_buffer_size={} max_storage_buffer_binding_size={}",
-            adapter.limits().max_buffer_size,
-            adapter.limits().max_storage_buffer_binding_size
+            "K3Test bridge adapter={} backend={:?} driver={:?}",
+            info.name, info.backend, info.driver
         );
 
-        let backend = info.backend;
-        // Sin features opcionales: solo lo básico que el BXM acepta seguro.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|error| format!("Vulkan device creation failed: {error}"))?;
 
-        // Surface: Rgba8Unorm (8-bit), sin HDR — la regla PowerVR.
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|format| *format == wgpu::TextureFormat::Rgba8UnormSrgb)
+            .or_else(|| caps.formats.iter().copied().find(|format| format.is_srgb()))
             .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
+        let present = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            caps.present_modes[0]
+        };
+
+        let size = if size.0 > 0 && size.1 > 0 {
+            size
+        } else {
+            owner.size()
+        };
+        let size = (size.0.max(1), size.1.max(1));
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Mailbox,
+            width: size.0,
+            height: size.1,
+            present_mode: present,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![format],
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
-
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("K3Test Depth"),
-            size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24Plus,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = create_depth_view(&device, size);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("K3Test Shader"),
+            label: Some("K3Test bridge shader"),
             source: wgpu::ShaderSource::Wgsl(format!("{VERTEX_SHADER}\n{FRAGMENT_SHADER}").into()),
         });
-
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("K3Test BGL"),
+            label: Some("K3Test bridge BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -274,36 +401,33 @@ impl Renderer {
                 count: None,
             }],
         });
-
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test Uniform"),
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test bridge uniform"),
             contents: bytemuck::cast_slice(&[0f32; 64]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("K3Test BG"),
+            label: Some("K3Test bridge BG"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
+                resource: uniform.as_entire_binding(),
             }],
         });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("K3Test PipelineLayout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            ..Default::default()
-        });
-
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("K3Test bridge pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                ..Default::default()
+            });
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test Cube"),
+            label: Some("K3Test bridge cube"),
             contents: bytemuck::cast_slice(CUBE_VERTICES),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("K3Test Pipeline"),
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("K3Test bridge pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -358,103 +482,98 @@ impl Renderer {
             cache: None,
         });
 
-        log::info!(
-            "K3Test: surface {}x{} format={:?} depth=Depth24Stencil8 msaa=1 (compatible PowerVR/Mali/Adreno)",
-            config.width,
-            config.height,
-            format
-        );
-
         Ok(Self {
-            backend,
-            surface,
+            context: SurfaceContext {
+                surface,
+                owner,
+                config,
+            },
             device,
             queue,
-            config,
-            render_pipeline,
-            uniform_buffer,
+            pipeline,
+            uniform,
             bind_group,
             vertex_buffer,
-            depth_view,
-            frames: 0,
-            fps_frames: 0,
-            fps_start: std::time::Instant::now(),
+            depth,
+            adapter_name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            format: format!("{format:?}"),
+            present: format!("{present:?}"),
         })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("K3Test Depth"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth24Plus,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            self.depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if width == 0 || height == 0 {
+            return;
         }
+        self.context.config.width = width;
+        self.context.config.height = height;
+        self.context
+            .surface
+            .configure(&self.device, &self.context.config);
+        self.depth = create_depth_view(&self.device, (width, height));
     }
 
-    fn update_uniform(&self, matrix: [[f32; 4]; 4]) {
-        let flat: [f32; 16] = [
+    fn render(&mut self, frame_index: u64) -> Result<(), String> {
+        let started = Instant::now();
+        let frame = match self.context.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.context
+                    .surface
+                    .configure(&self.device, &self.context.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(" surface lost".to_string());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err("swapchain validation error".to_string());
+            }
+        };
+
+        let angle = frame_index as f32 * 0.01;
+        let model = glam::Mat4::from_rotation_y(angle)
+            * glam::Mat4::from_rotation_x(angle * 0.6);
+        let matrix = model.to_cols_array_2d();
+        let flat = [
             matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
             matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
             matrix[2][0], matrix[2][1], matrix[2][2], matrix[2][3],
             matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3],
         ];
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&flat));
-    }
+        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
 
-    fn render(&mut self) -> Result<(), String> {
-        self.frames += 1;
-        self.fps_frames += 1;
-        if self.fps_start.elapsed().as_secs() >= 2 {
-            let fps = self.fps_frames as f64 / self.fps_start.elapsed().as_secs_f64();
-            log::info!("K3Test: {:.1} fps (backend={:?}, frames={})", fps, self.backend, self.frames);
-            self.fps_frames = 0;
-            self.fps_start = std::time::Instant::now();
-        }
-
-        let surface_frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                return Err("K3Test: swapchain validation".to_string());
-            }
-        };
-        let view = surface_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("K3Test Encoder"),
-        });
-
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("K3Test frame encoder"),
+            },
+        );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("K3Test Pass"),
+                label: Some("K3Test frame pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.10, g: 0.11, b: 0.14, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.10,
+                            g: 0.11,
+                            b: 0.14,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: &self.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -465,42 +584,302 @@ impl Renderer {
                 occlusion_query_set: None,
                 ..Default::default()
             });
-            pass.set_pipeline(&self.render_pipeline);
+            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.draw(0..CUBE_VERTICES.len() as u32, 0..1);
         }
-
         self.queue.submit(Some(encoder.finish()));
-        self.queue.present(surface_frame);
+        self.queue.present(frame);
+        let _ = started;
         Ok(())
     }
+}
+
+fn create_depth_view(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("K3Test depth"),
+            size: wgpu::Extent3d {
+                width: size.0.max(1),
+                height: size.1.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
+    let mut renderer: Option<Renderer> = None;
+    let mut frame_index: u64 = 0;
+    let mut fps_frames: u64 = 0;
+    let mut last_fps = Instant::now();
+    let mut last_status = Instant::now();
+
+    let initial_size = owner.size();
+    {
+        let mut state = shared.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            // `owner` is still borrowed here; it is released after this scope.
+            drop(owner);
+            return;
+        }
+    }
+
+    match pollster::block_on(Renderer::new(owner, initial_size)) {
+        Ok(candidate) => {
+            let mut state = shared.state.lock().expect("engine state mutex");
+            if state.shutdown {
+                drop(candidate);
+                return;
+            }
+            state.status.state = "running";
+            state.status.adapter = candidate.adapter_name.clone();
+            state.status.backend = candidate.backend.clone();
+            state.status.format = candidate.format.clone();
+            state.status.present = candidate.present.clone();
+            state.status.size = (
+                candidate.context.config.width,
+                candidate.context.config.height,
+            );
+            renderer = Some(candidate);
+        }
+        Err(error) => {
+            let mut state = shared.state.lock().expect("engine state mutex");
+            state.status.state = "error";
+            state.status.detail = error.clone();
+            log::error!("K3Test bridge initialization failed: {error}");
+            return;
+        }
+    }
+
+    loop {
+        let action = {
+            let mut state = shared.state.lock().expect("engine state mutex");
+            if state.shutdown {
+                break;
+            }
+            while !state.frame_pending && state.resize_pending.is_none() && !state.shutdown {
+                state = shared
+                    .ready
+                    .wait(state)
+                    .expect("engine state mutex");
+            }
+            if state.shutdown {
+                break;
+            }
+            (state.resize_pending.take(), state.frame_pending, state.shutdown)
+        };
+        shared.frame_requested.store(false, Ordering::Release);
+
+        let (resize, frame_pending, _) = action;
+        if let Some((width, height)) = resize {
+            if let Some(current) = renderer.as_mut() {
+                current.resize(width, height);
+                let mut state = shared.state.lock().expect("engine state mutex");
+                state.status.size = (width, height);
+            }
+        }
+        if !frame_pending {
+            continue;
+        }
+        frame_index += 1;
+        let Some(current) = renderer.as_mut() else {
+            continue;
+        };
+        match current.render(frame_index) {
+            Ok(()) => {
+                fps_frames += 1;
+                let mut state = shared.state.lock().expect("engine state mutex");
+                state.status.frames = state.status.frames.saturating_add(1);
+                state.status.detail = "frames".to_string();
+                if last_fps.elapsed() >= Duration::from_secs(1) {
+                    state.status.fps =
+                        fps_frames as f32 / last_fps.elapsed().as_secs_f32();
+                    fps_frames = 0;
+                    last_fps = Instant::now();
+                }
+                if last_status.elapsed() >= Duration::from_secs(2) {
+                    last_status = Instant::now();
+                    log::info!(
+                        "K3Test bridge running backend={} fps={:.1}",
+                        current.backend,
+                        state.status.fps
+                    );
+                }
+            }
+            Err(error) => {
+                let mut state = shared.state.lock().expect("engine state mutex");
+                state.status.state = "error";
+                state.status.detail = error;
+            }
+        }
+    }
+
+    // Drop the GPU resources, then the surface, then the ANativeWindow.
+    drop(renderer);
 }
 
 fn init_logging() {
     let logger = android_logger::Config::default()
         .with_max_level(log::LevelFilter::Info)
-        .with_tag("K3Test");
+        .with_tag("K3TestBridge");
     android_logger::init_once(logger);
-    log::info!("K3Test: logging ok");
+    log::info!("K3Test bridge logging ready");
 }
 
-#[unsafe(no_mangle)]
-fn android_main(app: AndroidApp) {
+fn jni_string(env: &mut JNIEnv<'_>, value: &str) -> jstring {
+    env.new_string(value)
+        .map(jni::objects::JString::into_raw)
+        .unwrap_or_else(|_| std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeCreate(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    surface: JObject<'_>,
+) -> jlong {
     init_logging();
-    log::info!("K3Test: android_main (lib=k3test, wgpu 30.0.1, Rgba8Unorm, Depth24, MSAA 1x)");
-    let event_loop = match EventLoop::builder()
-        .with_android_app(app)
-        .build()
-    {
-        Ok(el) => el,
-        Err(e) => {
-            log::error!("K3Test: EventLoop falló: {e}");
-            return;
-        }
-    };
-    let mut app = App::new();
-    if let Err(e) = event_loop.run_app(&mut app) {
-        log::error!("K3Test: run_app terminó: {e}");
+    if surface.is_null() {
+        log::error!("K3Test bridge nativeCreate called with a null Surface");
+        return 0;
     }
+    let Some(window) = (unsafe { NativeWindow::from_surface(env, surface) }) else {
+        log::error!("K3Test bridge could not acquire ANativeWindow");
+        return 0;
+    };
+
+    let id = NEXT_ENGINE.fetch_add(1, Ordering::Relaxed);
+    let shared = Arc::new(Shared::new(id));
+    let slot = Arc::new(EngineSlot {
+        id,
+        shared: Arc::clone(&shared),
+    });
+    engines()
+        .lock()
+        .expect("engine registry mutex")
+        .insert(id, Arc::clone(&slot));
+
+    let thread_shared = Arc::clone(&shared);
+    match thread::Builder::new()
+        .name(format!("K3Bridge-{id}"))
+        .spawn(move || {
+            render_worker(thread_shared, window);
+        }) {
+        Ok(_) => {
+            log::info!("K3Test bridge engine {id} worker started");
+            id as jlong
+        }
+        Err(error) => {
+            engines()
+                .lock()
+                .expect("engine registry mutex")
+                .remove(&id);
+            log::error!("K3Test bridge render thread spawn failed: {error}");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeResize(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    width: i32,
+    height: i32,
+) -> jni::sys::jboolean {
+    if handle <= 0 || width <= 0 || height <= 0 {
+        return 0;
+    }
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_resize(width as u32, height as u32) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeFrame(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    if handle <= 0 {
+        return 0;
+    }
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.request_frame() {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeDestroy(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    if handle <= 0 {
+        return 1;
+    }
+    let id = handle as EngineHandle;
+    let removed = engines()
+        .lock()
+        .expect("engine registry mutex")
+        .remove(&id);
+    let Some(engine) = removed else {
+        // Double destroy is not an error: it must never free twice.
+        return 1;
+    };
+    // Non-blocking teardown. The render worker performs the ordered cleanup
+    // on its own thread; the UI thread is never joined here.
+    engine.shared.request_shutdown();
+    log::info!("K3Test bridge engine {id} shutdown requested");
+    1
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeInfo(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jstring {
+    if handle <= 0 {
+        return jni_string(&mut env, "state=none");
+    }
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return jni_string(&mut env, "state=none");
+    };
+    let status = engine.shared.snapshot();
+    jni_string(
+        &mut env,
+        &format!(
+            "state={} frames={} fps={:.1} adapter={} backend={} format={} present={} size={}x{} detail={}",
+            status.state,
+            status.frames,
+            status.fps,
+            status.adapter,
+            status.backend,
+            status.format,
+            status.present,
+            status.size.0,
+            status.size.1,
+            status.detail
+        ),
+    )
 }
