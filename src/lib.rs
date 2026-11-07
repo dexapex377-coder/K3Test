@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
-    event::{WindowEvent, WindowId},
+    event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
-    platform::android::activity::AndroidApp,
-    window::WindowAttributes,
+    platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp},
+    window::{WindowAttributes, WindowId},
 };
 use wgpu::util::DeviceExt;
 
@@ -184,10 +184,9 @@ struct Renderer {
 
 impl Renderer {
     async fn new(window: Arc<winit::window::Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        instance_desc.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(&instance_desc);
 
         let surface = instance.create_surface(window)?;
         let surface: wgpu::Surface<'static> =
@@ -198,11 +197,12 @@ impl Renderer {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            ..Default::default()
         };
-        let adapter = instance
-            .request_adapter(&adapter_req)
-            .await
-            .ok_or("K3Test: sin adapter wgpu (¿Vulkan y GLES fallaron?)")?;
+        let adapter = match instance.request_adapter(&adapter_req).await {
+            Ok(adapter) => adapter,
+            Err(e) => return Err(format!("K3Test: sin adapter wgpu (¿Vulkan y GLES fallaron?): {e}").into()),
+        };
 
         let info = adapter.get_info();
         log::info!("K3Test: adapter={} backend={:?} driver={:?}", info.name, info.backend, info.driver);
@@ -237,8 +237,10 @@ impl Renderer {
             width: size.width,
             height: size.height,
             present_mode: wgpu::PresentMode::Mailbox,
-            desired_aspect_ratio: 1.0,
+            desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![format],
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
 
@@ -248,7 +250,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24Stencil8,
+            format: wgpu::TextureFormat::Depth24Plus,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -290,8 +292,8 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("K3Test PipelineLayout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            ..Default::default()
         });
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -341,9 +343,9 @@ impl Renderer {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24Stencil8,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -352,7 +354,7 @@ impl Renderer {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -391,7 +393,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth24Stencil8,
+                format: wgpu::TextureFormat::Depth24Plus,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
@@ -409,7 +411,7 @@ impl Renderer {
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&flat));
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self) -> Result<(), String> {
         self.frames += 1;
         self.fps_frames += 1;
         if self.fps_start.elapsed().as_secs() >= 2 {
@@ -419,8 +421,22 @@ impl Renderer {
             self.fps_start = std::time::Instant::now();
         }
 
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err("K3Test: swapchain validation".to_string());
+            }
+            _ => return Err("K3Test: unknown surface status".to_string()),
+        };
+        let view = surface_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("K3Test Encoder"),
@@ -448,6 +464,7 @@ impl Renderer {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                ..Default::default()
             });
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -456,7 +473,7 @@ impl Renderer {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        output.present();
+        self.queue.present(surface_frame);
         Ok(())
     }
 }
@@ -465,9 +482,8 @@ fn init_logging() {
     let logger = android_logger::Config::default()
         .with_max_level(log::LevelFilter::Info)
         .with_tag("K3Test");
-    if android_logger::init_once(logger).is_ok() {
-        log::info!("K3Test: logging ok");
-    }
+    android_logger::init_once(logger);
+    log::info!("K3Test: logging ok");
 }
 
 #[unsafe(no_mangle)]
