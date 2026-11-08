@@ -485,15 +485,20 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
         glam::Vec3::new(0.3, 1.0, 0.3),
         glam::Vec3::new(0.3, 0.55, 1.0),
     ];
-    let active = editor
-        .rotate_dragging
-        .and_then(|drag| match drag.kind {
-            tools::RotateKind::Axis(axis) => Some(axis.index()),
-            tools::RotateKind::Trackball => None,
-        });
+    let (active, only) = match editor.rotate_dragging.map(|drag| drag.kind) {
+        Some(tools::RotateKind::Axis(axis)) => (Some(axis.index()), Some(axis.index())),
+        _ => (None, None),
+    };
     const SIDES: usize = 6;
     const TUBE_RADIUS: f32 = 0.07;
     for (index, color) in colors.iter().enumerate() {
+        // While dragging an axis, the other two dials hide (Blender
+        // keeps the manipulated gizmo focused).
+        if let Some(only_index) = only {
+            if index != only_index {
+                continue;
+            }
+        }
         let axis = match index {
             0 => tools::Axis::X,
             1 => tools::Axis::Y,
@@ -501,12 +506,6 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
         };
         let kind = tools::RotateKind::Axis(axis);
         let direction = axis.direction();
-        let u = if direction == glam::Vec3::Z {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Z
-        };
-        let v = direction.cross(u).normalize();
         let tint = if active == Some(index) {
             glam::Vec3::splat(1.0)
         } else {
@@ -515,13 +514,14 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
         let points = tools::ring_points(center, kind, 48);
         let mut rings = Vec::with_capacity(points.len());
         for point in points {
+            // True round tube: cross-section circles in the (radial,
+            // axis) plane, perpendicular to the arc tangent.
+            let radial = (point - center).normalize();
             let mut ring = [glam::Vec3::ZERO; SIDES];
-            // Cross-section perpendicular to the local tangent; using
-            // the ring plane basis keeps the tube round about the arc.
             for (slot, offset_vec) in ring.iter_mut().enumerate() {
                 let angle = slot as f32 * std::f32::consts::TAU / SIDES as f32;
                 *offset_vec = point
-                    + (u * angle.cos() + v * angle.sin()) * TUBE_RADIUS;
+                    + (radial * angle.cos() + direction * angle.sin()) * TUBE_RADIUS;
             }
             rings.push(ring);
         }
@@ -1368,7 +1368,31 @@ impl Renderer {
                 Tool::Rotate => editor
                     .selected
                     .and_then(|index| scene.position(index))
-                    .map(|center| build_rotate_arcs(center, editor))
+                    .map(|center| {
+                        let mut verts = build_rotate_arcs(center, editor);
+                        // Solid white angle sector (dial FILL): shows the
+                        // rotation origin and swept angle while dragging.
+                        if let Some(drag) = editor.rotate_dragging {
+                            if let tools::RotateKind::Axis(axis) = drag.kind {
+                                let axis_dir = axis.direction();
+                                let radius = tools::ROTATE_RING_RADIUS;
+                                let white = glam::Vec3::splat(1.0);
+                                let steps = 24;
+                                for i in 0..steps {
+                                    let t0 = i as f32 / steps as f32 * drag.angle;
+                                    let t1 = (i + 1) as f32 / steps as f32 * drag.angle;
+                                    let q0 = glam::Quat::from_axis_angle(axis_dir, t0);
+                                    let q1 = glam::Quat::from_axis_angle(axis_dir, t1);
+                                    let p0 = center + q0 * (drag.grab_vec * radius);
+                                    let p1 = center + q1 * (drag.grab_vec * radius);
+                                    for point in [center, p0, p1] {
+                                        verts.push(Vertex::new(point, white));
+                                    }
+                                }
+                            }
+                        }
+                        verts
+                    })
                     .unwrap_or_default(),
                 Tool::None => Vec::new(),
             }
