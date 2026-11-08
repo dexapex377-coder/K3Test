@@ -99,8 +99,14 @@ impl Editor {
         let start_rotation = scene.rotation(object)?;
         let center = scene.position(object)?;
         let (eye, dir) = Self::ray_from_screen(camera, size, px, py);
-        let grab_vec = ray_sphere_point(eye, dir, center, ROTATE_RING_RADIUS)
-            .map(|point| (point - center).normalize())?;
+        let grab_vec = match kind {
+            // Blender dial: ray ∩ dial plane through the center (never
+            // misses unless the ray is parallel to the plane).
+            RotateKind::Axis(axis) => ray_plane_point(eye, dir, center, axis.direction())
+                .map(|point| (point - center).normalize())?,
+            RotateKind::Trackball => ray_sphere_point(eye, dir, center, ROTATE_RING_RADIUS)
+                .map(|point| (point - center).normalize())?,
+        };
         self.rotate_dragging = Some(RotateDrag {
             object,
             kind,
@@ -128,10 +134,19 @@ impl Editor {
         };
         let center = scene.position(drag.object).unwrap_or(Vec3::ZERO);
         let (eye, dir) = Self::ray_from_screen(camera, size, px, py);
-        let Some(point) = ray_sphere_point(eye, dir, center, ROTATE_RING_RADIUS) else {
-            return false;
+        let current_vec = match drag.kind {
+            RotateKind::Axis(axis) => match ray_plane_point(eye, dir, center, axis.direction()) {
+                Some(point) => (point - center).normalize(),
+                // Ray parallel to the dial plane: Blender freezes this
+                // event (delta = 0) instead of jumping or sticking.
+                None => return false,
+            },
+            RotateKind::Trackball => match ray_sphere_point(eye, dir, center, ROTATE_RING_RADIUS)
+            {
+                Some(point) => (point - center).normalize(),
+                None => return false,
+            },
         };
-        let current_vec = (point - center).normalize();
         let (rotation, angle) = match drag.kind {
             RotateKind::Axis(axis) => {
                 let delta = signed_angle_deltas(drag.last_vec, current_vec, axis.direction());
@@ -176,9 +191,23 @@ fn signed_angle_deltas(from: Vec3, to: Vec3, axis: Vec3) -> f32 {
 }
 
 /// Intersection of a ray with a sphere; Blender's dial grabs the ring
-/// sphere itself, so this is both the hit point and the angle source.
+/// sphere itself for the trackball, so this is both the hit point and
+/// the angle source.
 fn ray_sphere_point(eye: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<Vec3> {
     let t = crate::tools::ray_sphere(eye, dir, center, radius)?;
+    Some(eye + dir * t)
+}
+
+/// Ray ∩ dial plane through `center` with the axis as normal, exactly
+/// like Blender's `ED_view3d_win_to_3d_on_plane` in
+/// `dial_ghostarc_get_angles`. Fails only when the ray is parallel to
+/// the plane (caller freezes that event).
+fn ray_plane_point(eye: Vec3, dir: Vec3, center: Vec3, normal: Vec3) -> Option<Vec3> {
+    let denom = dir.dot(normal);
+    if denom.abs() < 1e-4 {
+        return None;
+    }
+    let t = (center - eye).dot(normal) / denom;
     Some(eye + dir * t)
 }
 
