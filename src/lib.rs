@@ -35,6 +35,12 @@ use raw_window_handle::{
 };
 use wgpu::util::DeviceExt;
 
+pub mod editor;
+pub mod scene;
+
+use editor::{Editor, Tool};
+use scene::Scene;
+
 const VERTEX_SHADER: &str = r"
 @group(0) @binding(0) var<uniform> vp: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> light_center: vec4<f32>;
@@ -77,23 +83,24 @@ fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
 }
 ";
 
-const DEFAULT_CAMERA_POSITION: glam::Vec3 =
+pub(crate) const DEFAULT_CAMERA_POSITION: glam::Vec3 =
     glam::Vec3::new(7.358891, -6.925791, 4.958309);
-const DEFAULT_LIGHT_POSITION: glam::Vec3 = glam::Vec3::new(4.076245, 1.005454, 5.903862);
-const WORLD_UP: glam::Vec3 = glam::Vec3::Z;
-const VIEW_FOV_Y: f32 = 50.0 * std::f32::consts::PI / 180.0;
-const VIEW_NEAR: f32 = 0.1;
-const VIEW_FAR: f32 = 100.0;
+pub(crate) const DEFAULT_LIGHT_POSITION: glam::Vec3 =
+    glam::Vec3::new(4.076245, 1.005454, 5.903862);
+pub(crate) const WORLD_UP: glam::Vec3 = glam::Vec3::Z;
+pub(crate) const VIEW_FOV_Y: f32 = 50.0 * std::f32::consts::PI / 180.0;
+pub(crate) const VIEW_NEAR: f32 = 0.1;
+pub(crate) const VIEW_FAR: f32 = 100.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
 }
 
 impl Vertex {
-    fn new(position: glam::Vec3, color: glam::Vec3) -> Self {
+    pub(crate) fn new(position: glam::Vec3, color: glam::Vec3) -> Self {
         Self {
             position: position.to_array(),
             color: color.to_array(),
@@ -102,11 +109,11 @@ impl Vertex {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CameraRig {
-    target: glam::Vec3,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+pub(crate) struct CameraRig {
+    pub(crate) target: glam::Vec3,
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) distance: f32,
 }
 
 impl Default for CameraRig {
@@ -123,7 +130,7 @@ impl Default for CameraRig {
 }
 
 impl CameraRig {
-    fn eye(&self) -> glam::Vec3 {
+    pub(crate) fn eye(&self) -> glam::Vec3 {
         let horizontal = self.pitch.cos();
         let offset = glam::Vec3::new(
             horizontal * self.yaw.cos(),
@@ -133,7 +140,7 @@ impl CameraRig {
         self.target + offset
     }
 
-    fn view_matrix(&self) -> glam::Mat4 {
+    pub(crate) fn view_matrix(&self) -> glam::Mat4 {
         glam::Mat4::look_at_rh(self.eye(), self.target, WORLD_UP)
     }
 
@@ -192,7 +199,7 @@ impl CameraRig {
 // Do not hand-roll these again: the previous custom matrix had both depth
 // signs flipped, which clipped every fragment and left a flat clear color.
 
-fn push_line(out: &mut Vec<Vertex>, a: glam::Vec3, b: glam::Vec3, color: glam::Vec3) {
+pub(crate) fn push_line(out: &mut Vec<Vertex>, a: glam::Vec3, b: glam::Vec3, color: glam::Vec3) {
     out.push(Vertex::new(a, color));
     out.push(Vertex::new(b, color));
 }
@@ -219,7 +226,7 @@ fn push_box_edges(
     }
 }
 
-fn build_cube_vertices() -> [Vertex; 36] {
+fn build_cube_vertices(offset: glam::Vec3) -> [Vertex; 36] {
     let face = |color: glam::Vec3| color;
     let g = 0.72;
     let gray = |shade: f32| face(glam::Vec3::splat(g * shade));
@@ -262,7 +269,35 @@ fn build_cube_vertices() -> [Vertex; 36] {
         Vertex::new(glam::Vec3::new(1.0, -1.0, 1.0), gray(0.32)),
         Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(0.32)),
     ];
+    for vertex in &mut vertices {
+        vertex.position[0] += offset.x;
+        vertex.position[1] += offset.y;
+        vertex.position[2] += offset.z;
+    }
     vertices
+}
+
+fn build_cube_edges(offset: glam::Vec3, color: glam::Vec3) -> Vec<Vertex> {
+    let corner = |x: f32, y: f32, z: f32| offset + glam::Vec3::new(x, y, z);
+    let edges = [
+        (corner(-1.0, -1.0, -1.0), corner(1.0, -1.0, -1.0)),
+        (corner(1.0, -1.0, -1.0), corner(1.0, 1.0, -1.0)),
+        (corner(1.0, 1.0, -1.0), corner(-1.0, 1.0, -1.0)),
+        (corner(-1.0, 1.0, -1.0), corner(-1.0, -1.0, -1.0)),
+        (corner(-1.0, -1.0, 1.0), corner(1.0, -1.0, 1.0)),
+        (corner(1.0, -1.0, 1.0), corner(1.0, 1.0, 1.0)),
+        (corner(1.0, 1.0, 1.0), corner(-1.0, 1.0, 1.0)),
+        (corner(-1.0, 1.0, 1.0), corner(-1.0, -1.0, 1.0)),
+        (corner(-1.0, -1.0, -1.0), corner(-1.0, -1.0, 1.0)),
+        (corner(1.0, -1.0, -1.0), corner(1.0, -1.0, 1.0)),
+        (corner(1.0, 1.0, -1.0), corner(1.0, 1.0, 1.0)),
+        (corner(-1.0, 1.0, -1.0), corner(-1.0, 1.0, 1.0)),
+    ];
+    let mut out = Vec::with_capacity(24);
+    for (a, b) in edges {
+        push_line(&mut out, a, b, color);
+    }
+    out
 }
 
 fn build_grid_vertices() -> Vec<Vertex> {
@@ -303,16 +338,15 @@ fn build_grid_vertices() -> Vec<Vertex> {
     out
 }
 
-fn build_camera_glyph_vertices() -> Vec<Vertex> {
+fn build_camera_glyph_vertices(center: glam::Vec3, color: glam::Vec3) -> Vec<Vertex> {
     // Blender-style camera icon: a recognizable rectangular body behind the
-    // lens plus the field-of-view frustum in front. Built once at startup
-    // into the shared line buffer; orientation follows the real camera
-    // transform (position -> origin).
-    let position = DEFAULT_CAMERA_POSITION;
-    let forward = (glam::Vec3::ZERO - position).normalize();
+    // lens plus the field-of-view frustum in front. Orientation follows the
+    // default camera aim (toward the origin); the object position itself
+    // is live scene state.
+    let position = center;
+    let forward = (glam::Vec3::ZERO - DEFAULT_CAMERA_POSITION).normalize();
     let right = forward.cross(WORLD_UP).normalize();
     let up = right.cross(forward).normalize();
-    let color = glam::Vec3::new(0.45, 0.9, 1.0);
 
     let rect = |center: glam::Vec3, half_right: f32, half_up: f32| {
         [
@@ -361,12 +395,11 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
     out
 }
 
-fn build_light_glyph_vertices() -> Vec<Vertex> {
+fn build_light_glyph_vertices(color: glam::Vec3) -> Vec<Vertex> {
     // Screen-aligned point-light icon (Blender light_point_lines style):
     // a small ring + center diamond + 8 symmetric rays, authored in a
     // local XY plane around the origin and billboarded by `vs_light`
-    // around DEFAULT_LIGHT_POSITION. Lines only, built once at startup.
-    let color = glam::Vec3::new(1.0, 0.85, 0.25);
+    // around the scene light position. Lines only, built on scene sync.
     let ring_radius = 0.30;
     let diamond_radius = 0.12;
     let ray_inner = 0.42;
@@ -402,11 +435,33 @@ fn build_light_glyph_vertices() -> Vec<Vertex> {
     out
 }
 
-fn build_line_vertices() -> Vec<Vertex> {
-    // World-space lines (grid + camera). The light icon is separate
-    // because it is billboarded in the shader (local XY plane).
+/// All world-space overlay lines: floor grid, camera glyph, move gizmo
+/// and selection outline. Rebuilt only when the scene/editor state
+/// changes (never per frame while idle).
+fn build_world_lines(scene: &Scene, editor: &Editor) -> Vec<Vertex> {
     let mut out = build_grid_vertices();
-    out.extend(build_camera_glyph_vertices());
+    let camera_selected = editor.selected == Some(scene::SCENE_CAMERA);
+    let camera_color = if camera_selected {
+        glam::Vec3::new(1.0, 0.6, 0.1)
+    } else {
+        glam::Vec3::new(0.45, 0.9, 1.0)
+    };
+    if let Some(position) = scene.position(scene::SCENE_CAMERA) {
+        out.extend(build_camera_glyph_vertices(position, camera_color));
+    }
+    if editor.show_gizmo() {
+        if let Some(origin) = editor.selected.and_then(|i| scene.position(i)) {
+            out.extend(editor::build_gizmo_vertices(origin));
+        }
+    }
+    if editor.selected == Some(scene::SCENE_CUBE) {
+        if let Some(position) = scene.position(scene::SCENE_CUBE) {
+            out.extend(build_cube_edges(
+                position,
+                glam::Vec3::new(1.0, 0.6, 0.1),
+            ));
+        }
+    }
     out
 }
 
@@ -517,6 +572,9 @@ struct WorkerState {
     shutdown: bool,
     camera: CameraRig,
     camera_commands: VecDeque<CameraCommand>,
+    scene: Scene,
+    editor: Editor,
+    scene_dirty: bool,
 }
 
 struct EngineSlot {
@@ -541,6 +599,9 @@ impl Shared {
                 shutdown: false,
                 camera: CameraRig::default(),
                 camera_commands: VecDeque::new(),
+                scene: Scene::default_scene(DEFAULT_CAMERA_POSITION, DEFAULT_LIGHT_POSITION),
+                editor: Editor::new(),
+                scene_dirty: true,
             }),
             ready: Condvar::new(),
         }
@@ -601,6 +662,89 @@ impl Shared {
         self.request_camera_command(CameraCommand::FrameAll)
     }
 
+    fn wake(&self, state: &mut WorkerState) {
+        state.frame_pending = true;
+        self.ready.notify_one();
+    }
+
+    fn set_tool(&self, tool: Tool) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return false;
+        }
+        state.editor.tool = tool;
+        self.wake(&mut state);
+        true
+    }
+
+    /// Tap pick. Returns the selected object index, or -1 on a miss.
+    fn pick(&self, px: f32, py: f32) -> i32 {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return -1;
+        }
+        let size = state.status.size;
+        let (eye, dir) = Editor::ray_from_screen(&state.camera, size, px, py);
+        // Clone scene refs are cheap enough: pick reads the live scene.
+        state.editor.apply_tap_pick(&state.scene, eye, dir);
+        let selected = state.editor.selected.map(|i| i as i32).unwrap_or(-1);
+        state.scene_dirty = true;
+        self.wake(&mut state);
+        selected
+    }
+
+    fn gizmo_hit(&self, px: f32, py: f32) -> i32 {
+        let state = self.state.lock().expect("engine state mutex");
+        if state.shutdown || !state.editor.show_gizmo() {
+            return -1;
+        }
+        let size = state.status.size;
+        state
+            .editor
+            .axis_hit(&state.scene, &state.camera, size, px, py)
+            .map(|axis| axis.index() as i32)
+            .unwrap_or(-1)
+    }
+
+    fn move_begin(&self, px: f32, py: f32) -> i32 {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown || !state.editor.show_gizmo() {
+            return -1;
+        }
+        let size = state.status.size;
+        let axis = state
+            .editor
+            .begin_drag(&state.scene, &state.camera, size, px, py);
+        self.wake(&mut state);
+        axis.map(|a| a.index() as i32).unwrap_or(-1)
+    }
+
+    fn move_to(&self, px: f32, py: f32) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown || state.editor.dragging.is_none() {
+            return false;
+        }
+        let size = state.status.size;
+        let changed = state
+            .editor
+            .drag_to(&mut state.scene, &state.camera, size, px, py);
+        if changed {
+            state.scene_dirty = true;
+            self.wake(&mut state);
+        }
+        true
+    }
+
+    fn move_end(&self) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return false;
+        }
+        state.editor.end_drag();
+        self.wake(&mut state);
+        true
+    }
+
     fn request_shutdown(&self) {
         let mut state = self.state.lock().expect("engine state mutex");
         state.shutdown = true;
@@ -652,6 +796,9 @@ struct Renderer {
     triangle_buffer: wgpu::Buffer,
     line_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
+    line_count: u32,
+    light_count: u32,
+    light_center: glam::Vec3,
     depth: wgpu::TextureView,
     adapter_name: String,
     backend: String,
@@ -660,7 +807,11 @@ struct Renderer {
 }
 
 impl Renderer {
-    async fn new(owner: NativeWindow, size: (u32, u32)) -> Result<Self, String> {
+    async fn new(
+        owner: NativeWindow,
+        size: (u32, u32),
+        scene: &Scene,
+    ) -> Result<Self, String> {
         let mut instance_descriptor =
             wgpu::InstanceDescriptor::new_with_display_handle(Box::new(owner.clone()));
         instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -844,23 +995,32 @@ impl Renderer {
                 ..Default::default()
             });
 
-        let cube = build_cube_vertices();
+        // Fixed-capacity dynamic buffers: rewritten only when the scene
+        // or selection changes, never per frame while idle.
+        const LINE_MAX: usize = 512;
+        const LIGHT_MAX: usize = 64;
+        let zero_vertex = Vertex {
+            position: [0.0; 3],
+            color: [0.0; 3],
+        };
+        let cube_offset = scene
+            .position(scene::SCENE_CUBE)
+            .unwrap_or(glam::Vec3::ZERO);
+        let cube = build_cube_vertices(cube_offset);
         let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("K3Test cube (2 m)"),
             contents: bytemuck::cast_slice(&cube),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        let lines = build_line_vertices();
         let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test grid/camera lines"),
-            contents: bytemuck::cast_slice(&lines),
-            usage: wgpu::BufferUsages::VERTEX,
+            label: Some("K3Test grid/camera/gizmo/selection lines"),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; LINE_MAX]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        let light = build_light_glyph_vertices();
         let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("K3Test billboard light icon (local XY)"),
-            contents: bytemuck::cast_slice(&light),
-            usage: wgpu::BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(&vec![zero_vertex; LIGHT_MAX]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
         let vertex_layout = wgpu::VertexBufferLayout {
@@ -970,7 +1130,7 @@ impl Renderer {
             return Err(format!("wgpu validation: {error:?}"));
         }
 
-        Ok(Self {
+        let mut renderer = Self {
             context: SurfaceContext {
                 surface,
                 owner,
@@ -986,12 +1146,49 @@ impl Renderer {
             triangle_buffer,
             line_buffer,
             light_buffer,
+            line_count: 0,
+            light_count: 0,
+            light_center: scene
+                .position(scene::SCENE_LIGHT)
+                .unwrap_or(DEFAULT_LIGHT_POSITION),
             depth,
             adapter_name: info.name.clone(),
             backend: format!("{:?}", info.backend),
             format: format!("{format:?}"),
             present: format!("{present:?}"),
-        })
+        };
+        renderer.sync_scene(scene, &Editor::new());
+        Ok(renderer)
+    }
+
+    /// Re-upload object/selection/gizmo geometry after a scene or
+    /// editor state change. No allocation escapes this call beyond the
+    /// small temporary vectors.
+    fn sync_scene(&mut self, scene: &Scene, editor: &Editor) {
+        let cube_offset = scene
+            .position(scene::SCENE_CUBE)
+            .unwrap_or(glam::Vec3::ZERO);
+        let cube = build_cube_vertices(cube_offset);
+        self.queue
+            .write_buffer(&self.triangle_buffer, 0, bytemuck::cast_slice(&cube));
+
+        let lines = build_world_lines(scene, editor);
+        self.queue
+            .write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(&lines));
+        self.line_count = lines.len() as u32;
+
+        let light_color = if editor.selected == Some(scene::SCENE_LIGHT) {
+            glam::Vec3::new(1.0, 0.6, 0.1)
+        } else {
+            glam::Vec3::new(1.0, 0.85, 0.25)
+        };
+        let light = build_light_glyph_vertices(light_color);
+        self.queue
+            .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&light));
+        self.light_count = light.len() as u32;
+        self.light_center = scene
+            .position(scene::SCENE_LIGHT)
+            .unwrap_or(DEFAULT_LIGHT_POSITION);
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1023,7 +1220,7 @@ impl Renderer {
         let forward = (camera.target - eye).normalize();
         let right = forward.cross(WORLD_UP).normalize();
         let up = right.cross(forward).normalize();
-        flat[64..67].copy_from_slice(&DEFAULT_LIGHT_POSITION.to_array());
+        flat[64..67].copy_from_slice(&self.light_center.to_array());
         flat[128..131].copy_from_slice(&right.to_array());
         flat[192..195].copy_from_slice(&up.to_array());
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
@@ -1097,16 +1294,10 @@ impl Renderer {
             // light icon — all in this same tiled render pass.
             pass.set_pipeline(&self.line_pipeline);
             pass.set_vertex_buffer(0, self.line_buffer.slice(..));
-            pass.draw(
-                0..(self.line_buffer.size() / std::mem::size_of::<Vertex>() as u64) as u32,
-                0..1,
-            );
+            pass.draw(0..self.line_count, 0..1);
             pass.set_pipeline(&self.light_pipeline);
             pass.set_vertex_buffer(0, self.light_buffer.slice(..));
-            pass.draw(
-                0..(self.light_buffer.size() / std::mem::size_of::<Vertex>() as u64) as u32,
-                0..1,
-            );
+            pass.draw(0..self.light_count, 0..1);
 
             // Object triangles last, in the same tiled render pass.
             pass.set_pipeline(&self.triangle_pipeline);
@@ -1154,7 +1345,15 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
         }
     }
 
-    match pollster::block_on(Renderer::new(owner, initial_size)) {
+    let initial_scene = {
+        shared
+            .state
+            .lock()
+            .expect("engine state mutex")
+            .scene
+            .clone()
+    };
+    match pollster::block_on(Renderer::new(owner, initial_size, &initial_scene)) {
         Ok(candidate) => {
             let mut state = shared.state.lock().expect("engine state mutex");
             if state.shutdown {
@@ -1203,11 +1402,22 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
             let resize = state.resize_pending.take();
             let frame_pending = state.frame_pending;
             state.frame_pending = false;
+            let scene_dirty = state.scene_dirty;
+            state.scene_dirty = false;
             let commands: Vec<CameraCommand> = state.camera_commands.drain(..).collect();
-            (resize, frame_pending, commands, state.camera)
+            (
+                resize,
+                frame_pending,
+                commands,
+                state.camera,
+                scene_dirty,
+                state.scene.clone(),
+                state.editor.clone(),
+            )
         };
 
-        let (resize, frame_pending, commands, mut camera) = action;
+        let (resize, frame_pending, commands, mut camera, scene_dirty, scene_snapshot, editor_snapshot) =
+            action;
         if let Some((width, height)) = resize {
             if let Some(current) = renderer.as_mut() {
                 current.resize(width, height);
@@ -1239,6 +1449,9 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
         let Some(current) = renderer.as_mut() else {
             continue;
         };
+        if scene_dirty {
+            current.sync_scene(&scene_snapshot, &editor_snapshot);
+        }
         match current.render(camera) {
             Ok(()) => {
                 fps_frames += 1;
@@ -1428,6 +1641,92 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeFrameAll(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeSetTool(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    tool: jni::sys::jint,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    let selected = engine.shared.set_tool(if tool == 1 {
+        Tool::Move
+    } else {
+        Tool::None
+    });
+    if selected { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativePick(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jint {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return -1;
+    };
+    engine.shared.pick(x, y)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeGizmoHit(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jint {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return -1;
+    };
+    engine.shared.gizmo_hit(x, y)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeMoveBegin(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jint {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return -1;
+    };
+    engine.shared.move_begin(x, y)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeMoveTo(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.move_to(x, y) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeMoveEnd(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.move_end() { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_dev_k3test_NativeBridge_nativeDestroy(
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -1465,10 +1764,17 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeInfo(
         return jni_string(&mut env, "state=none");
     };
     let status = engine.shared.snapshot();
+    let state = engine.shared.state.lock().expect("engine state mutex");
+    let tool = state.editor.tool.name();
+    let selected = state.editor.selected.map(|i| i as i32).unwrap_or(-1);
+    let cube = state
+        .scene
+        .position(scene::SCENE_CUBE)
+        .unwrap_or(glam::Vec3::ZERO);
     jni_string(
         &mut env,
         &format!(
-            "state={} frames={} fps={:.1} adapter={} backend={} format={} present={} size={}x{} detail={}",
+            "state={} frames={} fps={:.1} adapter={} backend={} format={} present={} size={}x{} tool={} selected={} cube=({:.2},{:.2},{:.2}) detail={}",
             status.state,
             status.frames,
             status.fps,
@@ -1478,6 +1784,11 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeInfo(
             status.present,
             status.size.0,
             status.size.1,
+            tool,
+            selected,
+            cube.x,
+            cube.y,
+            cube.z,
             status.detail
         ),
     )

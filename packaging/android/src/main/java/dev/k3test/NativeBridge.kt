@@ -18,6 +18,12 @@ internal object NativeBridge {
     external fun nativePan(handle: Long, dx: Float, dy: Float): Boolean
     external fun nativeZoom(handle: Long, scale: Float): Boolean
     external fun nativeFrameAll(handle: Long): Boolean
+    external fun nativeSetTool(handle: Long, tool: Int): Boolean
+    external fun nativePick(handle: Long, x: Float, y: Float): Int
+    external fun nativeGizmoHit(handle: Long, x: Float, y: Float): Int
+    external fun nativeMoveBegin(handle: Long, x: Float, y: Float): Int
+    external fun nativeMoveTo(handle: Long, x: Float, y: Float): Boolean
+    external fun nativeMoveEnd(handle: Long): Boolean
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeInfo(handle: Long): String
 }

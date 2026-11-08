@@ -32,11 +32,17 @@ internal class ViewportSurface(
     private var lastSingleY = 0f
     private var lastCentroid: Pair<Float, Float>? = null
     private var lastSpread = 0f
+    private var touchSlopPx = 10f
+    private var downX = 0f
+    private var downY = 0f
+    private var orbitDecided = false
+    private var moveDragging = false
 
     init {
         isFocusable = true
         isFocusableInTouchMode = true
         isClickable = true
+        touchSlopPx = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
         holder.addCallback(this)
         holder.setFormat(android.graphics.PixelFormat.RGBA_8888)
     }
@@ -105,11 +111,20 @@ internal class ViewportSurface(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val index = event.actionIndex
+                downX = event.getX(index)
+                downY = event.getY(index)
+                orbitDecided = false
+                moveDragging = false
                 setPointer(event.getPointerId(index), event.getX(index), event.getY(index))
                 resetGestureState()
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 val index = event.actionIndex
+                if (moveDragging) {
+                    NativeBridge.nativeMoveEnd(handle)
+                    moveDragging = false
+                }
+                orbitDecided = false
                 setPointer(event.getPointerId(index), event.getX(index), event.getY(index))
                 resetGestureState()
             }
@@ -117,7 +132,31 @@ internal class ViewportSurface(
                 for (index in 0 until event.pointerCount) {
                     setPointer(event.getPointerId(index), event.getX(index), event.getY(index))
                 }
-                handleMove(handle)
+                if (event.pointerCount == 1) {
+                    val x = event.getX(0)
+                    val y = event.getY(0)
+                    if (moveDragging) {
+                        NativeBridge.nativeMoveTo(handle, x, y)
+                    } else {
+                        if (!orbitDecided) {
+                            val dist = hypot(x - downX, y - downY)
+                            if (dist > touchSlopPx) {
+                                // First intent: a grabbed gizmo axis wins;
+                                // otherwise this becomes a camera orbit.
+                                orbitDecided = true
+                                if (NativeBridge.nativeMoveBegin(handle, downX, downY) >= 0) {
+                                    moveDragging = true
+                                    NativeBridge.nativeMoveTo(handle, x, y)
+                                }
+                            }
+                        }
+                        if (!moveDragging) {
+                            handleMove(handle)
+                        }
+                    }
+                } else {
+                    handleMove(handle)
+                }
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 val id = event.getPointerId(event.actionIndex)
@@ -125,6 +164,14 @@ internal class ViewportSurface(
                 resetGestureState()
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (moveDragging) {
+                    NativeBridge.nativeMoveEnd(handle)
+                    moveDragging = false
+                } else if (!orbitDecided) {
+                    // Short tap without slop: object picking (Blender
+                    // VIEW3D_OT_select behavior at touch scale).
+                    NativeBridge.nativePick(handle, downX, downY)
+                }
                 clearAllPointers()
                 resetGestureState()
             }
