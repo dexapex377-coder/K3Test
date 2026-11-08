@@ -506,8 +506,10 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
         };
         let kind = tools::RotateKind::Axis(axis);
         let direction = axis.direction();
+        // Active dial keeps its axis color at full strength; the wipe
+        // sector (not the arc) accumulates whiteness with the turns.
         let tint = if active == Some(index) {
-            glam::Vec3::splat(1.0)
+            *color
         } else {
             *color * 0.85
         };
@@ -825,6 +827,7 @@ impl Shared {
             return false;
         }
         state.editor.end_drag();
+        state.scene_dirty = true;
         self.wake(&mut state);
         true
     }
@@ -864,6 +867,8 @@ impl Shared {
             return false;
         }
         state.editor.rotate_end();
+        // Restore the full dial set (other axes come back).
+        state.scene_dirty = true;
         self.wake(&mut state);
         true
     }
@@ -922,6 +927,7 @@ struct Renderer {
     light_buffer: wgpu::Buffer,
     gizmo_buffer: wgpu::Buffer,
     view_buffer: wgpu::Buffer,
+    view_tri_buffer: wgpu::Buffer,
     line_count: u32,
     light_count: u32,
     gizmo_count: u32,
@@ -1158,8 +1164,13 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test view-dependent lines (trackball, sweep)"),
+            label: Some("K3Test view-dependent lines (sweep)"),
             contents: bytemuck::cast_slice(&vec![zero_vertex; 160]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let view_tri_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test trackball ring (view-aligned)"),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 2048]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -1313,6 +1324,7 @@ impl Renderer {
             light_buffer,
             gizmo_buffer,
             view_buffer,
+            view_tri_buffer,
             line_count: 0,
             light_count: 0,
             gizmo_count: 0,
@@ -1378,7 +1390,12 @@ impl Renderer {
                             if let tools::RotateKind::Axis(axis) = drag.kind {
                                 let axis_dir = axis.direction();
                                 let radius = tools::ROTATE_RING_RADIUS;
-                                let white = glam::Vec3::splat(1.0);
+                                // Blender's rotation_count: the sector
+                                // accumulates whiteness with full turns
+                                // (0.3 starter gray -> 1.0 white at 1 turn).
+                                let turns = (drag.angle.abs() / std::f32::consts::TAU).min(1.0);
+                                let shade = 0.3 + 0.7 * turns;
+                                let white = glam::Vec3::splat(shade);
                                 let steps = 24;
                                 for i in 0..steps {
                                     let t0 = i as f32 / steps as f32 * drag.angle;
@@ -1473,21 +1490,8 @@ impl Renderer {
         let right = forward.cross(WORLD_UP).normalize();
         let up = right.cross(forward).normalize();
         let radius = tools::ROTATE_RING_RADIUS;
-        // White trackball ring.
-        let steps = 48;
-        for i in 0..steps {
-            let a0 =
-                i as f32 * std::f32::consts::TAU / steps as f32;
-            let a1 =
-                (i + 1) as f32 * std::f32::consts::TAU / steps as f32;
-            let p0 = center + (right * a0.cos() + up * a0.sin()) * radius;
-            let p1 = center + (right * a1.cos() + up * a1.sin()) * radius;
-            let white = glam::Vec3::splat(0.92);
-            lines[count] = Vertex::new(p0, white);
-            lines[count + 1] = Vertex::new(p1, white);
-            count += 2;
-        }
-        // Sweep indicator while rotating by axis.
+        // Sweep indicator while rotating by axis (white trackball ring
+        // is drawn as triangles by sync_trackball).
         if let Some(drag) = editor.rotate_dragging {
             let grab = center + drag.grab_vec * radius;
             let current = center + drag.current_vec * radius;
@@ -1511,6 +1515,63 @@ impl Renderer {
         }
         self.queue
             .write_buffer(&self.view_buffer, 0, bytemuck::cast_slice(&lines[..count]));
+        count as u32
+    }
+
+    /// White trackball ring (Blender `MAN_AXIS_ROT_T`) as a view-aligned
+    /// solid tube, so it keeps real thickness from every angle.
+    /// Fixed-size buffer: rebuilt per visible frame while Rotate is
+    /// active (only 48 segments, no allocation).
+    fn sync_trackball(&self, camera: CameraRig, editor: &Editor, scene: &Scene) -> u32 {
+        if editor.tool != Tool::Rotate {
+            return 0;
+        }
+        let Some(center) = editor.selected.and_then(|i| scene.position(i)) else {
+            return 0;
+        };
+        let eye = camera.eye();
+        let forward = (camera.target - eye).normalize();
+        let right = forward.cross(WORLD_UP).normalize();
+        let up = right.cross(forward).normalize();
+        const SEGMENTS: usize = 48;
+        const SIDES: usize = 6;
+        let radius = tools::ROTATE_RING_RADIUS;
+        let tube = 0.055;
+        let white = glam::Vec3::splat(0.95);
+        let mut ring = [[glam::Vec3::ZERO; SIDES]; SEGMENTS + 1];
+        for i in 0..=SEGMENTS {
+            let a = i as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+            let radial = right * a.cos() + up * a.sin();
+            let point = center + radial * radius;
+            // Round tube: cross-section circles in the (radial, view)
+            // plane, both perpendicular to the local ring tangent.
+            for (slot, offset) in ring[i].iter_mut().enumerate() {
+                let b = slot as f32 * std::f32::consts::TAU / SIDES as f32;
+                *offset = point + (radial * b.cos() + forward * b.sin()) * tube;
+            }
+        }
+        let mut out = [[Vertex {
+            position: [0.0; 3],
+            color: [0.0; 3],
+        }; 3]; SEGMENTS * SIDES * 2 * 3];
+        let mut count = 0;
+        for window in ring.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            for side in 0..SIDES {
+                let next = (side + 1) % SIDES;
+                for tri in [
+                    [a[side], a[next], b[next]],
+                    [a[side], b[next], b[side]],
+                ] {
+                    for point in tri {
+                        out[count] = Vertex::new(point, white);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        self.queue
+            .write_buffer(&self.view_tri_buffer, 0, bytemuck::cast_slice(&out[..count]));
         count as u32
     }
 
@@ -1544,6 +1605,7 @@ impl Renderer {
         let height = self.context.config.height.max(1) as f32;
         self.update_uniform(camera, width / height);
         let view_line_count = self.sync_view_lines(camera, editor, scene);
+        let trackball_count = self.sync_trackball(camera, editor, scene);
 
         let view = frame
             .texture
@@ -1596,6 +1658,11 @@ impl Renderer {
                 pass.set_pipeline(&self.line_pipeline);
                 pass.set_vertex_buffer(0, self.view_buffer.slice(..));
                 pass.draw(0..view_line_count, 0..1);
+            }
+            if trackball_count > 0 {
+                pass.set_pipeline(&self.gizmo_pipeline);
+                pass.set_vertex_buffer(0, self.view_tri_buffer.slice(..));
+                pass.draw(0..trackball_count, 0..1);
             }
 
             // Object triangles, then the gizmo overlay on top.
