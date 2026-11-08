@@ -287,7 +287,7 @@ fn project(camera: &CameraRig, size: (u32, u32), world: Vec3) -> Option<(f32, f3
     if clip.w <= 0.0 {
         return None;
     }
-    let ndc = clip.xyz() / clip.w;
+    let ndc = glam::Vec3::new(clip.x, clip.y, clip.z) / clip.w;
     Some((
         (ndc.x * 0.5 + 0.5) * size.0 as f32,
         (0.5 - ndc.y * 0.5) * size.1 as f32,

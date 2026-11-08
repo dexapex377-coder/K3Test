@@ -684,9 +684,10 @@ impl Shared {
             return -1;
         }
         let size = state.status.size;
-        let (eye, dir) = Editor::ray_from_screen(&state.camera, size, px, py);
-        // Clone scene refs are cheap enough: pick reads the live scene.
-        state.editor.apply_tap_pick(&state.scene, eye, dir);
+        let camera = state.camera;
+        let (eye, dir) = Editor::ray_from_screen(&camera, size, px, py);
+        let WorkerState { editor, scene, .. } = &mut *state;
+        editor.apply_tap_pick(scene, eye, dir);
         let selected = state.editor.selected.map(|i| i as i32).unwrap_or(-1);
         state.scene_dirty = true;
         self.wake(&mut state);
@@ -712,9 +713,9 @@ impl Shared {
             return -1;
         }
         let size = state.status.size;
-        let axis = state
-            .editor
-            .begin_drag(&state.scene, &state.camera, size, px, py);
+        let camera = state.camera;
+        let WorkerState { editor, scene, .. } = &mut *state;
+        let axis = editor.begin_drag(scene, &camera, size, px, py);
         self.wake(&mut state);
         axis.map(|a| a.index() as i32).unwrap_or(-1)
     }
@@ -725,9 +726,9 @@ impl Shared {
             return false;
         }
         let size = state.status.size;
-        let changed = state
-            .editor
-            .drag_to(&mut state.scene, &state.camera, size, px, py);
+        let camera = state.camera;
+        let WorkerState { editor, scene, .. } = &mut *state;
+        let changed = editor.drag_to(scene, &camera, size, px, py);
         if changed {
             state.scene_dirty = true;
             self.wake(&mut state);
