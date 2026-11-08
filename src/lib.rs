@@ -754,6 +754,8 @@ impl Shared {
             return true;
         }
         state.editor.tool = tool;
+        // Gizmo geometry depends on the active tool: force a rebuild.
+        state.scene_dirty = true;
         self.wake(&mut state);
         true
     }
