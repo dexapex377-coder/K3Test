@@ -1101,7 +1101,10 @@ impl Renderer {
         let cube_offset = scene
             .position(scene::SCENE_CUBE)
             .unwrap_or(glam::Vec3::ZERO);
-        let cube = build_cube_vertices(cube_offset);
+        let cube_rotation = scene
+            .rotation(scene::SCENE_CUBE)
+            .unwrap_or(glam::Quat::IDENTITY);
+        let cube = build_cube_vertices(cube_offset, cube_rotation);
         let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("K3Test cube (2 m)"),
             contents: bytemuck::cast_slice(&cube),
