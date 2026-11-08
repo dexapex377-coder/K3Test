@@ -724,7 +724,7 @@ impl Renderer {
 
         // Capture validation errors instead of letting wgpu's fatal
         // handler kill the render thread silently.
-        device.push_error_scope("K3Test Phase 1 resources");
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("K3Test Phase 1 viewport shader"),
             source: wgpu::ShaderSource::Wgsl(format!("{VERTEX_SHADER}\n{FRAGMENT_SHADER}").into()),
@@ -954,7 +954,7 @@ impl Renderer {
             "vs_light",
             "K3Test billboard light icon",
         );
-        if let Some(error) = device.pop_error_scope().await {
+        if let Some(error) = error_scope.pop().await {
             return Err(format!("wgpu validation: {error:?}"));
         }
 
