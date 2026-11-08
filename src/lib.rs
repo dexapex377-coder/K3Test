@@ -331,7 +331,7 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
     // stays proportional to the 2 m default cube.
     let far = rect(position + forward * 2.5, 0.90, 0.51);
 
-    let mut out = Vec::with_capacity(44);
+    let mut out = Vec::with_capacity(76);
     for i in 0..4 {
         // Body outline.
         push_line(&mut out, front[i], front[(i + 1) % 4], color);
@@ -340,6 +340,19 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
         // Frustum: spokes from the lens face + far rectangle.
         push_line(&mut out, front[i], far[i], color);
         push_line(&mut out, far[i], far[(i + 1) % 4], color);
+    }
+    // Lens glass: inset rectangle on the front face.
+    let lens = rect(position, 0.16, 0.12);
+    for i in 0..4 {
+        push_line(&mut out, lens[i], lens[(i + 1) % 4], color);
+    }
+    // Viewfinder hump on top of the body.
+    let hump_front = rect(position - forward * 0.15 + up * 0.21, 0.07, 0.04);
+    let hump_back = rect(position - forward * 0.45 + up * 0.21, 0.07, 0.04);
+    for i in 0..4 {
+        push_line(&mut out, hump_front[i], hump_front[(i + 1) % 4], color);
+        push_line(&mut out, hump_back[i], hump_back[(i + 1) % 4], color);
+        push_line(&mut out, hump_front[i], hump_back[i], color);
     }
     // Blender camera_tria: up marker attached to the body front face
     // (base is the front top edge, apex is the lens center).
