@@ -161,31 +161,20 @@ private fun ToolBar(
     moveActive: Boolean,
     onMoveToggle: () -> Unit,
 ) {
-    Column(
-        modifier = modifier
-            .padding(4.dp)
-            .background(Color(0xFF232732), RoundedCornerShape(16.dp))
-            .padding(4.dp)
-    ) {
+    Column(modifier = modifier) {
         Box(
             modifier = Modifier
-                .size(56.dp)
-                .border(
-                    1.dp,
-                    if (moveActive) Color(0xFF6FB6E8) else Color.Transparent,
-                    RoundedCornerShape(12.dp)
-                )
+                .size(64.dp)
                 .clickable(onClick = onMoveToggle),
             contentAlignment = androidx.compose.ui.Alignment.Center
         ) {
             // Figcraft vector: rounded black background + white arrows.
+            // The drawable owns its background; the toolbar adds none.
             Image(
                 painter = painterResource(id = R.drawable.move),
                 contentDescription = "Move tool",
                 contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .size(56.dp)
-                    .padding(2.dp)
+                modifier = Modifier.size(64.dp)
             )
         }
     }
