@@ -111,11 +111,12 @@ private fun ViewportScreen() {
     }
 
     LaunchedEffect(handle) {
-        if (handle != 0L) {
-            NativeBridge.nativeSetTool(handle, if (moveActive) 1 else 0)
-        }
+        // Self-healing sync: re-applying the tool is a no-op in Rust when
+        // nothing changed, so polling keeps the native side consistent
+        // across surface recreations at zero idle cost.
         while (true) {
             if (handle != 0L) {
+                NativeBridge.nativeSetTool(handle, if (moveActive) 1 else 0)
                 status = NativeBridge.nativeInfo(handle)
             }
             delay(500)

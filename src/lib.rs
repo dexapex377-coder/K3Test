@@ -667,6 +667,9 @@ impl Shared {
         if state.shutdown {
             return false;
         }
+        if state.editor.tool == tool {
+            return true;
+        }
         state.editor.tool = tool;
         self.wake(&mut state);
         true
