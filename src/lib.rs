@@ -774,7 +774,10 @@ impl Renderer {
                 },
             ],
         });
-        let mut uniform_bytes = [0f32; 28];
+        // VP at 0, light center/right/up at 256-byte steps: keeps every
+        // uniform binding offset aligned for any device (PowerVR 32,
+        // Mali/Adreno up to 256).
+        let mut uniform_bytes = [0f32; 196];
         uniform_bytes[0] = 1.0;
         uniform_bytes[5] = 1.0;
         uniform_bytes[10] = 1.0;
@@ -803,7 +806,7 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &uniform,
-                        offset: 64,
+                        offset: 256,
                         size: None,
                     }),
                 },
@@ -811,7 +814,7 @@ impl Renderer {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &uniform,
-                        offset: 80,
+                        offset: 512,
                         size: None,
                     }),
                 },
@@ -819,7 +822,7 @@ impl Renderer {
                     binding: 3,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &uniform,
-                        offset: 96,
+                        offset: 768,
                         size: None,
                     }),
                 },
@@ -1000,7 +1003,7 @@ impl Renderer {
             glam::Mat4::perspective_rh(VIEW_FOV_Y, aspect, VIEW_NEAR, VIEW_FAR);
         let view_proj = projection * view;
         let columns = view_proj.to_cols_array_2d();
-        let mut flat = [0_f32; 28];
+        let mut flat = [0_f32; 196];
         for (column_index, column) in columns.iter().enumerate() {
             for row in 0..4 {
                 flat[column_index * 4 + row] = column[row];
@@ -1011,9 +1014,9 @@ impl Renderer {
         let forward = (camera.target - eye).normalize();
         let right = forward.cross(WORLD_UP).normalize();
         let up = right.cross(forward).normalize();
-        flat[16..19].copy_from_slice(&DEFAULT_LIGHT_POSITION.to_array());
-        flat[20..23].copy_from_slice(&right.to_array());
-        flat[24..27].copy_from_slice(&up.to_array());
+        flat[64..67].copy_from_slice(&DEFAULT_LIGHT_POSITION.to_array());
+        flat[128..131].copy_from_slice(&right.to_array());
+        flat[192..195].copy_from_slice(&up.to_array());
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
     }
 
