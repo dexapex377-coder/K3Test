@@ -449,11 +449,6 @@ fn build_world_lines(scene: &Scene, editor: &Editor) -> Vec<Vertex> {
     if let Some(position) = scene.position(scene::SCENE_CAMERA) {
         out.extend(build_camera_glyph_vertices(position, camera_color));
     }
-    if editor.show_gizmo() {
-        if let Some(origin) = editor.selected.and_then(|i| scene.position(i)) {
-            out.extend(editor::build_gizmo_vertices(origin));
-        }
-    }
     if editor.selected == Some(scene::SCENE_CUBE) {
         if let Some(position) = scene.position(scene::SCENE_CUBE) {
             out.extend(build_cube_edges(
@@ -792,13 +787,16 @@ struct Renderer {
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     light_pipeline: wgpu::RenderPipeline,
+    gizmo_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     triangle_buffer: wgpu::Buffer,
     line_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
+    gizmo_buffer: wgpu::Buffer,
     line_count: u32,
     light_count: u32,
+    gizmo_count: u32,
     light_center: glam::Vec3,
     depth: wgpu::TextureView,
     adapter_name: String,
@@ -1023,6 +1021,11 @@ impl Renderer {
             contents: bytemuck::cast_slice(&vec![zero_vertex; LIGHT_MAX]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
+        let gizmo_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test move gizmo"),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 64]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
 
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -1050,6 +1053,8 @@ impl Renderer {
             topology: wgpu::PrimitiveTopology,
             cull_mode: Option<wgpu::Face>,
             entry_point: &'static str,
+            depth_compare: wgpu::CompareFunction,
+            depth_write: bool,
             label: &'static str,
         ) -> wgpu::RenderPipeline {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1079,8 +1084,8 @@ impl Renderer {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth24Plus,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(depth_compare),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -1103,6 +1108,8 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleList,
             Some(wgpu::Face::Back),
             "vs_main",
+            wgpu::CompareFunction::Less,
+            true,
             "K3Test cube triangles",
         );
         let line_pipeline = make_pipeline(
@@ -1114,6 +1121,8 @@ impl Renderer {
             wgpu::PrimitiveTopology::LineList,
             None,
             "vs_main",
+            wgpu::CompareFunction::Less,
+            true,
             "K3Test grid and camera",
         );
         let light_pipeline = make_pipeline(
@@ -1125,7 +1134,24 @@ impl Renderer {
             wgpu::PrimitiveTopology::LineList,
             None,
             "vs_light",
+            wgpu::CompareFunction::Less,
+            true,
             "K3Test billboard light icon",
+        );
+        // Gizmo arrows render as an overlay (Blender-style): visible
+        // through the object so manipulators are never buried in it.
+        let gizmo_pipeline = make_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            &vertex_layout,
+            format,
+            wgpu::PrimitiveTopology::LineList,
+            None,
+            "vs_main",
+            wgpu::CompareFunction::Always,
+            false,
+            "K3Test move gizmo overlay",
         );
         if let Some(error) = error_scope.pop().await {
             return Err(format!("wgpu validation: {error:?}"));
@@ -1142,13 +1168,16 @@ impl Renderer {
             triangle_pipeline,
             line_pipeline,
             light_pipeline,
+            gizmo_pipeline,
             uniform,
             bind_group,
             triangle_buffer,
             line_buffer,
             light_buffer,
+            gizmo_buffer,
             line_count: 0,
             light_count: 0,
+            gizmo_count: 0,
             light_center: scene
                 .position(scene::SCENE_LIGHT)
                 .unwrap_or(DEFAULT_LIGHT_POSITION),
@@ -1187,6 +1216,20 @@ impl Renderer {
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&light));
         self.light_count = light.len() as u32;
+
+        let gizmo: Vec<Vertex> = if editor.show_gizmo() {
+            editor
+                .selected
+                .and_then(|index| scene.position(index))
+                .map(editor::build_gizmo_vertices)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.queue
+            .write_buffer(&self.gizmo_buffer, 0, bytemuck::cast_slice(&gizmo));
+        self.gizmo_count = gizmo.len() as u32;
+
         self.light_center = scene
             .position(scene::SCENE_LIGHT)
             .unwrap_or(DEFAULT_LIGHT_POSITION);
@@ -1300,10 +1343,15 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.light_buffer.slice(..));
             pass.draw(0..self.light_count, 0..1);
 
-            // Object triangles last, in the same tiled render pass.
+            // Object triangles, then the gizmo overlay on top.
             pass.set_pipeline(&self.triangle_pipeline);
             pass.set_vertex_buffer(0, self.triangle_buffer.slice(..));
             pass.draw(0..36, 0..1);
+            if self.gizmo_count > 0 {
+                pass.set_pipeline(&self.gizmo_pipeline);
+                pass.set_vertex_buffer(0, self.gizmo_buffer.slice(..));
+                pass.draw(0..self.gizmo_count, 0..1);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);

@@ -59,8 +59,9 @@ pub const AXES: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
 /// is a pixel-space tolerance, not a world-space one).
 const AXIS_HIT_RADIUS_PX: f32 = 72.0;
 
-/// World length of a drawn axis arrow.
-const AXIS_ARROW_LENGTH: f32 = 1.25;
+/// World length of a drawn axis arrow. Longer than the 2 m default cube
+/// (half-size 1 m) so the manipulators are never buried inside it.
+const AXIS_ARROW_LENGTH: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DragState {
@@ -317,16 +318,15 @@ pub fn build_gizmo_vertices(origin: Vec3) -> Vec<crate::Vertex> {
     for (axis, color) in AXES.iter().zip(colors.iter()) {
         let tip = origin + axis.direction() * crate::editor::AXIS_ARROW_LENGTH;
         crate::push_line(&mut out, origin, tip, *color);
-        // Arrowhead: two short barbs angled back from the tip.
-        let back = tip - axis.direction() * 0.22;
+        // Arrowhead: two back-folded barbs from the tip.
+        let back = tip - axis.direction() * 0.34;
         let perp = if *axis == Axis::Z {
             glam::Vec3::X
         } else {
             glam::Vec3::Z
         };
         for sign in [1.0, -1.0] {
-            let barb =
-                back + perp * 0.09 * sign + axis.direction() * 0.0;
+            let barb = back + perp * 0.16 * sign;
             crate::push_line(&mut out, tip, barb, *color);
         }
         // Center hub marker.
