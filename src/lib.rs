@@ -1152,7 +1152,7 @@ impl Renderer {
         });
         let gizmo_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("K3Test move/rotate gizmo"),
-            contents: bytemuck::cast_slice(&vec![zero_vertex; 1024]),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 6144]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1375,8 +1375,10 @@ impl Renderer {
         } else {
             Vec::new()
         };
+        let gizmo_capacity = self.gizmo_buffer.size() as usize / std::mem::size_of::<Vertex>();
+        let gizmo = &gizmo[..gizmo.len().min(gizmo_capacity)];
         self.queue
-            .write_buffer(&self.gizmo_buffer, 0, bytemuck::cast_slice(&gizmo));
+            .write_buffer(&self.gizmo_buffer, 0, bytemuck::cast_slice(gizmo));
         self.gizmo_count = gizmo.len() as u32;
 
         self.light_center = scene
