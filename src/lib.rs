@@ -722,6 +722,9 @@ impl Renderer {
         surface.configure(&device, &config);
         let depth = create_depth_view(&device, size);
 
+        // Capture validation errors instead of letting wgpu's fatal
+        // handler kill the render thread silently.
+        device.push_error_scope("K3Test Phase 1 resources");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("K3Test Phase 1 viewport shader"),
             source: wgpu::ShaderSource::Wgsl(format!("{VERTEX_SHADER}\n{FRAGMENT_SHADER}").into()),
@@ -951,6 +954,9 @@ impl Renderer {
             "vs_light",
             "K3Test billboard light icon",
         );
+        if let Some(error) = device.pop_error_scope().await {
+            return Err(format!("wgpu validation: {error:?}"));
+        }
 
         Ok(Self {
             context: SurfaceContext {
