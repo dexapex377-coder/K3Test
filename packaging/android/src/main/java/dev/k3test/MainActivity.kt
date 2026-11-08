@@ -167,22 +167,24 @@ private fun ToolBar(
     Column(modifier = modifier) {
         Box(
             modifier = Modifier
-                .size(64.dp)
-                .border(
-                    2.dp,
-                    if (moveActive) Color(0xFF4A9BE8) else Color.Transparent,
-                    RoundedCornerShape(16.dp)
-                )
+                .size(68.dp)
                 .clickable(onClick = onMoveToggle),
             contentAlignment = androidx.compose.ui.Alignment.Center
         ) {
             // Figcraft vector: rounded black background + white arrows.
-            // The drawable owns its background; the toolbar adds none.
+            // The drawable owns its background; the blue active outline
+            // hugs the icon with its native 95:77 aspect ratio.
             Image(
                 painter = painterResource(id = R.drawable.move),
                 contentDescription = "Move tool",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.size(64.dp)
+                contentScale = ContentScale.FillBounds,
+                modifier = Modifier
+                    .size(64.dp, 52.dp)
+                    .border(
+                        2.dp,
+                        if (moveActive) Color(0xFF4A9BE8) else Color.Transparent,
+                        RoundedCornerShape(14.dp)
+                    )
             )
         }
     }
