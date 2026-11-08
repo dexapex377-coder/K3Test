@@ -168,6 +168,11 @@ private fun ToolBar(
         Box(
             modifier = Modifier
                 .size(64.dp)
+                .border(
+                    2.dp,
+                    if (moveActive) Color(0xFF4A9BE8) else Color.Transparent,
+                    RoundedCornerShape(16.dp)
+                )
                 .clickable(onClick = onMoveToggle),
             contentAlignment = androidx.compose.ui.Alignment.Center
         ) {
