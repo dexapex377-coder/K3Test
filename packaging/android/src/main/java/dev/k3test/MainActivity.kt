@@ -3,7 +3,7 @@ package dev.k3test
 import android.view.Choreographer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,9 +24,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -170,10 +170,6 @@ private fun ToolBar(
         Box(
             modifier = Modifier
                 .size(56.dp)
-                .background(
-                    if (moveActive) Color(0xFF3A5068) else Color(0xFF2C3038),
-                    RoundedCornerShape(12.dp)
-                )
                 .border(
                     1.dp,
                     if (moveActive) Color(0xFF6FB6E8) else Color.Transparent,
@@ -182,31 +178,15 @@ private fun ToolBar(
                 .clickable(onClick = onMoveToggle),
             contentAlignment = androidx.compose.ui.Alignment.Center
         ) {
-            MoveToolIcon()
+            // Figcraft vector: rounded black background + white arrows.
+            Image(
+                painter = painterResource(id = R.drawable.move),
+                contentDescription = "Move tool",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .size(56.dp)
+                    .padding(2.dp)
+            )
         }
-    }
-}
-
-/** Blender-style Move icon: X (red), Y (green), Z (blue) arrows. */
-@Composable
-private fun MoveToolIcon() {
-    Canvas(modifier = Modifier.size(40.dp)) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val length = size.minDimension * 0.36f
-
-        fun arrow(direction: Offset, color: Color) {
-            val tip = center + direction * length
-            drawLine(color, center, tip, strokeWidth = 4f, cap = StrokeCap.Round)
-            // Back-folded barb perpendicular to the arrow direction.
-            val back = tip - direction * length * 0.32f
-            val perp = Offset(-direction.y, direction.x) * length * 0.16f
-            drawLine(color, tip, back + perp, strokeWidth = 4f, cap = StrokeCap.Round)
-            drawLine(color, tip, back - perp, strokeWidth = 4f, cap = StrokeCap.Round)
-        }
-
-        arrow(Offset(1f, 0f), Color(0xFFFF4D4D))
-        arrow(Offset(-0.55f, -0.84f), Color(0xFF59E65C))
-        arrow(Offset(-0.55f, 0.84f), Color(0xFF5A8CFF))
-        drawCircle(Color.White, radius = 3f, center = center)
     }
 }
