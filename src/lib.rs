@@ -323,32 +323,28 @@ fn build_camera_glyph_vertices() -> Vec<Vertex> {
         ]
     };
 
-    // Body: 0.60 x 0.45 section, 0.90 long, lens at `position`.
-    let front = rect(position, 0.30, 0.225);
-    let back = rect(position - forward * 0.90, 0.30, 0.225);
-    // Frustum: Blender draws a rectangular tube (camera_frame), not a
-    // tapered cone: near and far rectangles share the view-frame size
-    // (50 mm lens / 36 mm sensor => 1.44 x 0.81 half-extents).
-    let near_frame = rect(position, 1.44, 0.81);
-    let far = rect(position + forward * 4.0, 1.44, 0.81);
+    // Body: 0.55 x 0.42 section, 0.80 long, lens at `position`.
+    let front = rect(position, 0.275, 0.21);
+    let back = rect(position - forward * 0.80, 0.275, 0.21);
+    // Frustum: Blender view-frame projection for the default 50 mm lens
+    // over a 36 mm sensor, drawn at a 2.5 m draw distance so the icon
+    // stays proportional to the 2 m default cube.
+    let far = rect(position + forward * 2.5, 0.90, 0.51);
 
-    let mut out = Vec::with_capacity(54);
+    let mut out = Vec::with_capacity(44);
     for i in 0..4 {
         // Body outline.
         push_line(&mut out, front[i], front[(i + 1) % 4], color);
         push_line(&mut out, back[i], back[(i + 1) % 4], color);
         push_line(&mut out, front[i], back[i], color);
-        // Frustum tube: near rectangle, far rectangle, 4 connectors.
-        push_line(&mut out, near_frame[i], near_frame[(i + 1) % 4], color);
+        // Frustum: spokes from the lens face + far rectangle.
+        push_line(&mut out, front[i], far[i], color);
         push_line(&mut out, far[i], far[(i + 1) % 4], color);
-        push_line(&mut out, near_frame[i], far[i], color);
     }
-    // Blender camera_tria: small triangle at the lens marking "up".
-    let top_left = position - right * 1.44 + up * 0.81;
-    let top_right = position + right * 1.44 + up * 0.81;
-    push_line(&mut out, top_left, top_right, color);
-    push_line(&mut out, top_right, position, color);
-    push_line(&mut out, position, top_left, color);
+    // Blender camera_tria: up marker attached to the body front face
+    // (base is the front top edge, apex is the lens center).
+    push_line(&mut out, position, front[2], color);
+    push_line(&mut out, position, front[3], color);
     out
 }
 
