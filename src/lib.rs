@@ -1550,10 +1550,10 @@ impl Renderer {
                 *offset = point + (radial * b.cos() + forward * b.sin()) * tube;
             }
         }
-        let mut out = [[Vertex {
+        let mut out = [Vertex {
             position: [0.0; 3],
             color: [0.0; 3],
-        }; 3]; SEGMENTS * SIDES * 2 * 3];
+        }; SEGMENTS * SIDES * 2 * 3];
         let mut count = 0;
         for window in ring.windows(2) {
             let (a, b) = (window[0], window[1]);
