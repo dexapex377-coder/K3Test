@@ -1886,10 +1886,10 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeSetTool(
     let Some(engine) = find_engine(handle as EngineHandle) else {
         return 0;
     };
-    let selected = engine.shared.set_tool(if tool == 1 {
-        Tool::Move
-    } else {
-        Tool::None
+    let selected = engine.shared.set_tool(match tool {
+        1 => Tool::Move,
+        2 => Tool::Rotate,
+        _ => Tool::None,
     });
     if selected { 1 } else { 0 }
 }
