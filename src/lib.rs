@@ -457,11 +457,7 @@ fn build_world_lines(scene: &Scene, editor: &Editor) -> Vec<Vertex> {
             .unwrap_or(glam::Quat::IDENTITY);
         out.extend(build_camera_glyph_vertices(position, rotation, camera_color));
     }
-    if editor.tool == Tool::Rotate {
-        if let Some(center) = editor.selected.and_then(|i| scene.position(i)) {
-            out.extend(build_rotate_arcs(center, editor));
-        }
-    }
+
     if editor.selected == Some(scene::SCENE_CUBE) {
         if let Some(position) = scene.position(scene::SCENE_CUBE) {
             let rotation = scene
@@ -477,12 +473,13 @@ fn build_world_lines(scene: &Scene, editor: &Editor) -> Vec<Vertex> {
     out
 }
 
-/// Static rotate dials: 3 colored 300° arcs (Blender `ED_GIZMO_DIAL_DRAW_FLAG_CLIP`
-/// style with staggered gaps) around the selected object. The white
-/// trackball ring and the sweep indicator are view-dependent and are
-/// rebuilt every frame in `render` (small fixed buffer, no allocation).
+/// Rotate dials as solid tubes (Blender `ED_GIZMO_DIAL_DRAW_FLAG_CLIP`
+/// style: 300° arcs with staggered gaps, rendered thick like the move
+/// arrows because GPU lines are always 1 px wide). The white trackball
+/// ring and sweep indicator are view-dependent lines rebuilt every
+/// frame in `render`.
 fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
-    let mut out = Vec::with_capacity(150);
+    let mut out = Vec::with_capacity(900);
     let colors = [
         glam::Vec3::new(1.0, 0.25, 0.25),
         glam::Vec3::new(0.3, 1.0, 0.3),
@@ -494,20 +491,53 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
             editor::RotateKind::Axis(axis) => Some(axis.index()),
             editor::RotateKind::Trackball => None,
         });
+    const SIDES: usize = 6;
+    const TUBE_RADIUS: f32 = 0.07;
     for (index, color) in colors.iter().enumerate() {
-        let kind = editor::RotateKind::Axis(match index {
+        let axis = match index {
             0 => editor::Axis::X,
             1 => editor::Axis::Y,
             _ => editor::Axis::Z,
-        });
+        };
+        let kind = editor::RotateKind::Axis(axis);
+        let direction = axis.direction();
+        let u = if direction == glam::Vec3::Z {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Z
+        };
+        let v = direction.cross(u).normalize();
         let tint = if active == Some(index) {
             glam::Vec3::splat(1.0)
         } else {
             *color * 0.85
         };
         let points = editor::ring_points(center, kind, 48);
-        for window in points.windows(2) {
-            push_line(&mut out, window[0], window[1], tint);
+        let mut rings = Vec::with_capacity(points.len());
+        for point in points {
+            let mut ring = [glam::Vec3::ZERO; SIDES];
+            // Cross-section perpendicular to the local tangent; using
+            // the ring plane basis keeps the tube round about the arc.
+            for (slot, offset_vec) in ring.iter_mut().enumerate() {
+                let angle = slot as f32 * std::f32::consts::TAU / SIDES as f32;
+                *offset_vec = point
+                    + (u * angle.cos() + v * angle.sin()) * TUBE_RADIUS;
+            }
+            rings.push(ring);
+        }
+        for window in rings.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            for side in 0..SIDES {
+                let next = (side + 1) % SIDES;
+                for tri in [
+                    [a[side], a[next], b[next]],
+                    [a[side], b[next], b[side]],
+                ] {
+                    for point in tri {
+                        out.push(Vertex::new(point, tint));
+                    }
+                }
+            }
         }
     }
     out
@@ -1121,8 +1151,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let gizmo_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("K3Test move gizmo"),
-            contents: bytemuck::cast_slice(&vec![zero_vertex; 256]),
+            label: Some("K3Test move/rotate gizmo"),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 1024]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1326,12 +1356,22 @@ impl Renderer {
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&light));
         self.light_count = light.len() as u32;
 
+        // One gizmo per active tool: Move arrows OR Rotate dials,
+        // never both (activating one tool must hide the other's gizmo).
         let gizmo: Vec<Vertex> = if editor.show_gizmo() {
-            editor
-                .selected
-                .and_then(|index| scene.position(index))
-                .map(editor::build_gizmo_vertices)
-                .unwrap_or_default()
+            match editor.tool {
+                Tool::Move => editor
+                    .selected
+                    .and_then(|index| scene.position(index))
+                    .map(editor::build_gizmo_vertices)
+                    .unwrap_or_default(),
+                Tool::Rotate => editor
+                    .selected
+                    .and_then(|index| scene.position(index))
+                    .map(|center| build_rotate_arcs(center, editor))
+                    .unwrap_or_default(),
+                Tool::None => Vec::new(),
+            }
         } else {
             Vec::new()
         };
