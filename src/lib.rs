@@ -1023,7 +1023,7 @@ impl Renderer {
         });
         let gizmo_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("K3Test move gizmo"),
-            contents: bytemuck::cast_slice(&vec![zero_vertex; 64]),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 256]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -1140,13 +1140,14 @@ impl Renderer {
         );
         // Gizmo arrows render as an overlay (Blender-style): visible
         // through the object so manipulators are never buried in it.
+        // Solid triangles: GPU lines are always 1 px wide.
         let gizmo_pipeline = make_pipeline(
             &device,
             &shader,
             &pipeline_layout,
             &vertex_layout,
             format,
-            wgpu::PrimitiveTopology::LineList,
+            wgpu::PrimitiveTopology::TriangleList,
             None,
             "vs_main",
             wgpu::CompareFunction::Always,

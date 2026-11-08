@@ -214,8 +214,11 @@ impl Editor {
 }
 
 /// Closest-point parameter between a ray and a world axis line through
-/// `origin` along `direction`. None when the ray is (near) parallel to
-/// the axis, which freezes the drag instead of producing jumps.
+/// `origin` along `direction` — the exact same ray-ray closest-point
+/// computation Blender uses via `isect_ray_ray_v3` in
+/// `transform_constraints.cc` for axis-constrained translate.
+/// None when the ray is (near) parallel to the axis, which freezes the
+/// drag instead of producing jumps.
 fn axis_param(ray_origin: Vec3, ray_dir: Vec3, origin: Vec3, direction: Vec3) -> Option<f32> {
     let w0 = ray_origin - origin;
     let b = ray_dir.dot(direction);
@@ -225,7 +228,7 @@ fn axis_param(ray_origin: Vec3, ray_dir: Vec3, origin: Vec3, direction: Vec3) ->
     if denom.abs() < 0.02 {
         return None;
     }
-    Some((b * e - d) / denom)
+    Some((e - b * d) / denom)
 }
 
 fn ray_aabb(eye: Vec3, dir: Vec3, center: Vec3, half: f32) -> Option<f32> {
@@ -307,35 +310,60 @@ fn segment_distance_2d(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     ((point.0 - closest.0).powi(2) + (point.1 - closest.1).powi(2)).sqrt()
 }
 
-/// Arrow geometry (local to the gizmo origin) drawn when Move is active.
+/// Solid arrow geometry (triangles) for the move gizmo: a hexagonal
+/// shaft plus a conical head per axis. Solid triangles are needed
+/// because Vulkan/WGPU lines are always 1 px wide; triangles give the
+/// manipulators real thickness from every angle, like Blender's gizmo
+/// meshes.
 pub fn build_gizmo_vertices(origin: Vec3) -> Vec<crate::Vertex> {
-    let mut out = Vec::with_capacity(24);
+    let mut out = Vec::with_capacity(162);
     let colors = [
         glam::Vec3::new(1.0, 0.25, 0.25),
         glam::Vec3::new(0.3, 1.0, 0.3),
         glam::Vec3::new(0.3, 0.55, 1.0),
     ];
+    let shaft_radius = 0.065;
+    let head_radius = 0.17;
+    let head_length = 0.42;
+    let shaft_end = crate::editor::AXIS_ARROW_LENGTH - head_length;
+    const SIDES: usize = 6;
+
     for (axis, color) in AXES.iter().zip(colors.iter()) {
-        let tip = origin + axis.direction() * crate::editor::AXIS_ARROW_LENGTH;
-        crate::push_line(&mut out, origin, tip, *color);
-        // Arrowhead: two back-folded barbs from the tip.
-        let back = tip - axis.direction() * 0.34;
-        let perp = if *axis == Axis::Z {
+        let direction = axis.direction();
+        let u = if *axis == Axis::Z {
             glam::Vec3::X
         } else {
             glam::Vec3::Z
         };
-        for sign in [1.0, -1.0] {
-            let barb = back + perp * 0.16 * sign;
-            crate::push_line(&mut out, tip, barb, *color);
+        let v = direction.cross(u).normalize();
+        let ring = |center: Vec3, radius: f32| {
+            let mut points = [Vec3::ZERO; SIDES];
+            for (index, slot) in points.iter_mut().enumerate() {
+                let angle = index as f32 * std::f32::consts::TAU / SIDES as f32;
+                *slot = center + (u * angle.cos() + v * angle.sin()) * radius;
+            }
+            points
+        };
+        let base = ring(origin, shaft_radius);
+        let mid = ring(origin + direction * shaft_end, shaft_radius);
+        let head_base = ring(origin + direction * shaft_end, head_radius);
+        let tip = origin + direction * crate::editor::AXIS_ARROW_LENGTH;
+        for side in 0..SIDES {
+            let next = (side + 1) % SIDES;
+            // Shaft quad (2 triangles).
+            for tri in [
+                [base[side], base[next], mid[next]],
+                [base[side], mid[next], mid[side]],
+            ] {
+                for point in tri {
+                    out.push(crate::Vertex::new(point, *color));
+                }
+            }
+            // Cone head side (1 triangle).
+            for point in [tip, head_base[side], head_base[next]] {
+                out.push(crate::Vertex::new(point, *color));
+            }
         }
-        // Center hub marker.
-        crate::push_line(
-            &mut out,
-            origin - axis.direction() * 0.10,
-            origin + axis.direction() * 0.10,
-            *color,
-        );
     }
     out
 }
