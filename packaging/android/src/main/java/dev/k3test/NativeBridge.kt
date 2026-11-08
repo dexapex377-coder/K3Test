@@ -24,6 +24,9 @@ internal object NativeBridge {
     external fun nativeMoveBegin(handle: Long, x: Float, y: Float): Int
     external fun nativeMoveTo(handle: Long, x: Float, y: Float): Boolean
     external fun nativeMoveEnd(handle: Long): Boolean
+    external fun nativeRotateBegin(handle: Long, x: Float, y: Float): Int
+    external fun nativeRotateTo(handle: Long, x: Float, y: Float): Boolean
+    external fun nativeRotateEnd(handle: Long): Boolean
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeInfo(handle: Long): String
 }

@@ -3,7 +3,7 @@
 //! Transformations live here, not in the renderer: the renderer only
 //! receives a snapshot of positions and draws them.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ObjectKind {
@@ -16,6 +16,7 @@ pub enum ObjectKind {
 pub struct SceneObject {
     pub kind: ObjectKind,
     pub position: Vec3,
+    pub rotation: Quat,
 }
 
 #[derive(Clone)]
@@ -37,14 +38,17 @@ impl Scene {
                 SceneObject {
                     kind: ObjectKind::Cube { half_size: 1.0 },
                     position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
                 },
                 SceneObject {
                     kind: ObjectKind::Camera,
                     position: camera_position,
+                    rotation: Quat::IDENTITY,
                 },
                 SceneObject {
                     kind: ObjectKind::Light,
                     position: light_position,
+                    rotation: Quat::IDENTITY,
                 },
             ],
         }
@@ -58,6 +62,16 @@ impl Scene {
         if let Some(object) = self.objects.get_mut(index) {
             object.position = position;
         }
+    }
+
+    pub fn set_rotation(&mut self, index: usize, rotation: Quat) {
+        if let Some(object) = self.objects.get_mut(index) {
+            object.rotation = rotation;
+        }
+    }
+
+    pub fn rotation(&self, index: usize) -> Option<Quat> {
+        self.objects.get(index).map(|object| object.rotation)
     }
 
     /// Picking proxy radius used for the camera/light icons.

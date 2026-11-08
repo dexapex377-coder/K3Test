@@ -226,7 +226,7 @@ fn push_box_edges(
     }
 }
 
-fn build_cube_vertices(offset: glam::Vec3) -> [Vertex; 36] {
+fn build_cube_vertices(offset: glam::Vec3, rotation: glam::Quat) -> [Vertex; 36] {
     let face = |color: glam::Vec3| color;
     let g = 0.72;
     let gray = |shade: f32| face(glam::Vec3::splat(g * shade));
@@ -270,15 +270,17 @@ fn build_cube_vertices(offset: glam::Vec3) -> [Vertex; 36] {
         Vertex::new(glam::Vec3::new(-1.0, -1.0, 1.0), gray(0.32)),
     ];
     for vertex in &mut vertices {
-        vertex.position[0] += offset.x;
-        vertex.position[1] += offset.y;
-        vertex.position[2] += offset.z;
+        let local = glam::Vec3::new(vertex.position[0], vertex.position[1], vertex.position[2]);
+        let world = offset + rotation * local;
+        vertex.position = [world.x, world.y, world.z];
     }
     vertices
 }
 
-fn build_cube_edges(offset: glam::Vec3, color: glam::Vec3) -> Vec<Vertex> {
-    let corner = |x: f32, y: f32, z: f32| offset + glam::Vec3::new(x, y, z);
+fn build_cube_edges(offset: glam::Vec3, rotation: glam::Quat, color: glam::Vec3) -> Vec<Vertex> {
+    let corner = |x: f32, y: f32, z: f32| {
+        offset + rotation * glam::Vec3::new(x, y, z)
+    };
     let edges = [
         (corner(-1.0, -1.0, -1.0), corner(1.0, -1.0, -1.0)),
         (corner(1.0, -1.0, -1.0), corner(1.0, 1.0, -1.0)),
@@ -338,13 +340,16 @@ fn build_grid_vertices() -> Vec<Vertex> {
     out
 }
 
-fn build_camera_glyph_vertices(center: glam::Vec3, color: glam::Vec3) -> Vec<Vertex> {
+fn build_camera_glyph_vertices(
+    center: glam::Vec3,
+    rotation: glam::Quat,
+    color: glam::Vec3,
+) -> Vec<Vertex> {
     // Blender-style camera icon: a recognizable rectangular body behind the
-    // lens plus the field-of-view frustum in front. Orientation follows the
-    // default camera aim (toward the origin); the object position itself
-    // is live scene state.
+    // lens plus the field-of-view frustum in front. The icon follows the
+    // object's live position and rotation (default aim toward the origin).
     let position = center;
-    let forward = (glam::Vec3::ZERO - DEFAULT_CAMERA_POSITION).normalize();
+    let forward = rotation * (glam::Vec3::ZERO - DEFAULT_CAMERA_POSITION).normalize();
     let right = forward.cross(WORLD_UP).normalize();
     let up = right.cross(forward).normalize();
 
@@ -447,14 +452,62 @@ fn build_world_lines(scene: &Scene, editor: &Editor) -> Vec<Vertex> {
         glam::Vec3::new(0.45, 0.9, 1.0)
     };
     if let Some(position) = scene.position(scene::SCENE_CAMERA) {
-        out.extend(build_camera_glyph_vertices(position, camera_color));
+        let rotation = scene
+            .rotation(scene::SCENE_CAMERA)
+            .unwrap_or(glam::Quat::IDENTITY);
+        out.extend(build_camera_glyph_vertices(position, rotation, camera_color));
+    }
+    if editor.tool == Tool::Rotate {
+        if let Some(center) = editor.selected.and_then(|i| scene.position(i)) {
+            out.extend(build_rotate_arcs(center, editor));
+        }
     }
     if editor.selected == Some(scene::SCENE_CUBE) {
         if let Some(position) = scene.position(scene::SCENE_CUBE) {
+            let rotation = scene
+                .rotation(scene::SCENE_CUBE)
+                .unwrap_or(glam::Quat::IDENTITY);
             out.extend(build_cube_edges(
                 position,
+                rotation,
                 glam::Vec3::new(1.0, 0.6, 0.1),
             ));
+        }
+    }
+    out
+}
+
+/// Static rotate dials: 3 colored 300° arcs (Blender `ED_GIZMO_DIAL_DRAW_FLAG_CLIP`
+/// style with staggered gaps) around the selected object. The white
+/// trackball ring and the sweep indicator are view-dependent and are
+/// rebuilt every frame in `render` (small fixed buffer, no allocation).
+fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(150);
+    let colors = [
+        glam::Vec3::new(1.0, 0.25, 0.25),
+        glam::Vec3::new(0.3, 1.0, 0.3),
+        glam::Vec3::new(0.3, 0.55, 1.0),
+    ];
+    let active = editor
+        .rotate_dragging
+        .and_then(|drag| match drag.kind {
+            editor::RotateKind::Axis(axis) => Some(axis.index()),
+            editor::RotateKind::Trackball => None,
+        });
+    for (index, color) in colors.iter().enumerate() {
+        let kind = editor::RotateKind::Axis(match index {
+            0 => editor::Axis::X,
+            1 => editor::Axis::Y,
+            _ => editor::Axis::Z,
+        });
+        let tint = if active == Some(index) {
+            glam::Vec3::splat(1.0)
+        } else {
+            *color * 0.85
+        };
+        let points = editor::ring_points(center, kind, 48);
+        for window in points.windows(2) {
+            push_line(&mut out, window[0], window[1], tint);
         }
     }
     out
@@ -707,7 +760,7 @@ impl Shared {
 
     fn move_begin(&self, px: f32, py: f32) -> i32 {
         let mut state = self.state.lock().expect("engine state mutex");
-        if state.shutdown || !state.editor.show_gizmo() {
+        if state.shutdown || state.editor.tool != Tool::Move || state.editor.selected.is_none() {
             return -1;
         }
         let size = state.status.size;
@@ -740,6 +793,45 @@ impl Shared {
             return false;
         }
         state.editor.end_drag();
+        self.wake(&mut state);
+        true
+    }
+
+    fn rotate_begin(&self, px: f32, py: f32) -> i32 {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown || state.editor.tool != Tool::Rotate || state.editor.selected.is_none() {
+            return -1;
+        }
+        let size = state.status.size;
+        let camera = state.camera;
+        let WorkerState { editor, scene, .. } = &mut *state;
+        let kind = editor.rotate_begin(scene, &camera, size, px, py);
+        self.wake(&mut state);
+        kind.map(|k| k.index()).unwrap_or(-1)
+    }
+
+    fn rotate_to(&self, px: f32, py: f32) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown || state.editor.rotate_dragging.is_none() {
+            return false;
+        }
+        let size = state.status.size;
+        let camera = state.camera;
+        let WorkerState { editor, scene, .. } = &mut *state;
+        let changed = editor.rotate_to(scene, &camera, size, px, py);
+        if changed {
+            state.scene_dirty = true;
+            self.wake(&mut state);
+        }
+        true
+    }
+
+    fn rotate_end(&self) -> bool {
+        let mut state = self.state.lock().expect("engine state mutex");
+        if state.shutdown {
+            return false;
+        }
+        state.editor.rotate_end();
         self.wake(&mut state);
         true
     }
@@ -797,6 +889,7 @@ struct Renderer {
     line_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
     gizmo_buffer: wgpu::Buffer,
+    view_buffer: wgpu::Buffer,
     line_count: u32,
     light_count: u32,
     gizmo_count: u32,
@@ -1029,6 +1122,11 @@ impl Renderer {
             contents: bytemuck::cast_slice(&vec![zero_vertex; 256]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
+        let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("K3Test view-dependent lines (trackball, sweep)"),
+            contents: bytemuck::cast_slice(&vec![zero_vertex; 160]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
 
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -1179,6 +1277,7 @@ impl Renderer {
             line_buffer,
             light_buffer,
             gizmo_buffer,
+            view_buffer,
             line_count: 0,
             light_count: 0,
             gizmo_count: 0,
@@ -1202,7 +1301,10 @@ impl Renderer {
         let cube_offset = scene
             .position(scene::SCENE_CUBE)
             .unwrap_or(glam::Vec3::ZERO);
-        let cube = build_cube_vertices(cube_offset);
+        let cube_rotation = scene
+            .rotation(scene::SCENE_CUBE)
+            .unwrap_or(glam::Quat::IDENTITY);
+        let cube = build_cube_vertices(cube_offset, cube_rotation);
         self.queue
             .write_buffer(&self.triangle_buffer, 0, bytemuck::cast_slice(&cube));
 
@@ -1274,7 +1376,79 @@ impl Renderer {
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&flat));
     }
 
-    fn render(&mut self, camera: CameraRig) -> Result<(), String> {
+    /// View-dependent lines: Blender's white trackball ring (view-aligned
+    /// dial, `MAN_AXIS_ROT_T`) plus the drag sweep indicator (white radius
+    /// line + dashed start radius, `WM_GIZMO_DRAW_VALUE`).
+    /// Fixed-size stack buffer: no allocation per frame.
+    fn sync_view_lines(
+        &self,
+        camera: CameraRig,
+        editor: &Editor,
+        scene: &Scene,
+    ) -> u32 {
+        let mut lines = [Vertex {
+            position: [0.0; 3],
+            color: [0.0; 3],
+        }; 160];
+        let mut count: usize = 0;
+        if editor.tool != Tool::Rotate {
+            return 0;
+        }
+        let Some(center) = editor.selected.and_then(|i| scene.position(i)) else {
+            return 0;
+        };
+        let eye = camera.eye();
+        let forward = (camera.target - eye).normalize();
+        let right = forward.cross(WORLD_UP).normalize();
+        let up = right.cross(forward).normalize();
+        let radius = editor::ROTATE_RING_RADIUS;
+        // White trackball ring.
+        let steps = 48;
+        for i in 0..steps {
+            let a0 =
+                i as f32 * std::f32::consts::TAU / steps as f32;
+            let a1 =
+                (i + 1) as f32 * std::f32::consts::TAU / steps as f32;
+            let p0 = center + (right * a0.cos() + up * a0.sin()) * radius;
+            let p1 = center + (right * a1.cos() + up * a1.sin()) * radius;
+            let white = glam::Vec3::splat(0.92);
+            lines[count] = Vertex::new(p0, white);
+            lines[count + 1] = Vertex::new(p1, white);
+            count += 2;
+        }
+        // Sweep indicator while rotating by axis.
+        if let Some(drag) = editor.rotate_dragging {
+            let grab = center + drag.grab_vec * radius;
+            let current = center + drag.current_vec * radius;
+            // Solid: center -> current angle.
+            lines[count] = Vertex::new(center, glam::Vec3::splat(1.0));
+            lines[count + 1] = Vertex::new(current, glam::Vec3::splat(1.0));
+            count += 2;
+            // Dashed: center -> grab angle (3 dashes).
+            for (t0, t1) in [(0.0, 0.4), (0.5, 0.7), (0.8, 1.0)] {
+                let dash_color = glam::Vec3::splat(0.85);
+                lines[count] = Vertex::new(
+                    center + (grab - center) * t0,
+                    dash_color,
+                );
+                lines[count + 1] = Vertex::new(
+                    center + (grab - center) * t1,
+                    dash_color,
+                );
+                count += 2;
+            }
+        }
+        self.queue
+            .write_buffer(&self.view_buffer, 0, bytemuck::cast_slice(&lines[..count]));
+        count as u32
+    }
+
+    fn render(
+        &mut self,
+        camera: CameraRig,
+        editor: &Editor,
+        scene: &Scene,
+    ) -> Result<(), String> {
         let started = Instant::now();
         let frame = match self.context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1298,6 +1472,7 @@ impl Renderer {
         let width = self.context.config.width.max(1) as f32;
         let height = self.context.config.height.max(1) as f32;
         self.update_uniform(camera, width / height);
+        let view_line_count = self.sync_view_lines(camera, editor, scene);
 
         let view = frame
             .texture
@@ -1346,6 +1521,11 @@ impl Renderer {
             pass.set_pipeline(&self.light_pipeline);
             pass.set_vertex_buffer(0, self.light_buffer.slice(..));
             pass.draw(0..self.light_count, 0..1);
+            if view_line_count > 0 {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_vertex_buffer(0, self.view_buffer.slice(..));
+                pass.draw(0..view_line_count, 0..1);
+            }
 
             // Object triangles, then the gizmo overlay on top.
             pass.set_pipeline(&self.triangle_pipeline);
@@ -1505,7 +1685,7 @@ fn render_worker(shared: Arc<Shared>, owner: NativeWindow) {
         if scene_dirty {
             current.sync_scene(&scene_snapshot, &editor_snapshot);
         }
-        match current.render(camera) {
+        match current.render(camera, &editor_snapshot, &scene_snapshot) {
             Ok(()) => {
                 fps_frames += 1;
                 let mut state = shared.state.lock().expect("engine state mutex");
@@ -1780,6 +1960,46 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeMoveEnd(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeRotateBegin(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jint {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return -1;
+    };
+    engine.shared.rotate_begin(x, y)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeRotateTo(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.rotate_to(x, y) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_k3test_NativeBridge_nativeRotateEnd(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    let Some(engine) = find_engine(handle as EngineHandle) else {
+        return 0;
+    };
+    if engine.shared.rotate_end() { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_dev_k3test_NativeBridge_nativeDestroy(
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -1824,6 +2044,11 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeInfo(
         .scene
         .position(scene::SCENE_CUBE)
         .unwrap_or(glam::Vec3::ZERO);
+    let detail = if state.editor.rotate_dragging.is_some() {
+        format!("rotate={:.1}°", state.editor.rotate_degrees())
+    } else {
+        status.detail.clone()
+    };
     jni_string(
         &mut env,
         &format!(
@@ -1842,7 +2067,7 @@ pub extern "system" fn Java_dev_k3test_NativeBridge_nativeInfo(
             cube.x,
             cube.y,
             cube.z,
-            status.detail
+            detail
         ),
     )
 }

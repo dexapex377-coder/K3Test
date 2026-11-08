@@ -37,6 +37,7 @@ internal class ViewportSurface(
     private var downY = 0f
     private var orbitDecided = false
     private var moveDragging = false
+    private var rotateDragging = false
 
     init {
         isFocusable = true
@@ -124,6 +125,10 @@ internal class ViewportSurface(
                     NativeBridge.nativeMoveEnd(handle)
                     moveDragging = false
                 }
+                if (rotateDragging) {
+                    NativeBridge.nativeRotateEnd(handle)
+                    rotateDragging = false
+                }
                 orbitDecided = false
                 setPointer(event.getPointerId(index), event.getX(index), event.getY(index))
                 resetGestureState()
@@ -137,20 +142,25 @@ internal class ViewportSurface(
                     val y = event.getY(0)
                     if (moveDragging) {
                         NativeBridge.nativeMoveTo(handle, x, y)
+                    } else if (rotateDragging) {
+                        NativeBridge.nativeRotateTo(handle, x, y)
                     } else {
                         if (!orbitDecided) {
                             val dist = hypot(x - downX, y - downY)
                             if (dist > touchSlopPx) {
-                                // First intent: a grabbed gizmo axis wins;
+                                // First intent: a grabbed gizmo wins;
                                 // otherwise this becomes a camera orbit.
                                 orbitDecided = true
                                 if (NativeBridge.nativeMoveBegin(handle, downX, downY) >= 0) {
                                     moveDragging = true
                                     NativeBridge.nativeMoveTo(handle, x, y)
+                                } else if (NativeBridge.nativeRotateBegin(handle, downX, downY) >= 0) {
+                                    rotateDragging = true
+                                    NativeBridge.nativeRotateTo(handle, x, y)
                                 }
                             }
                         }
-                        if (!moveDragging) {
+                        if (!moveDragging && !rotateDragging) {
                             handleMove(handle)
                         }
                     }
@@ -167,6 +177,9 @@ internal class ViewportSurface(
                 if (moveDragging) {
                     NativeBridge.nativeMoveEnd(handle)
                     moveDragging = false
+                } else if (rotateDragging) {
+                    NativeBridge.nativeRotateEnd(handle)
+                    rotateDragging = false
                 } else if (!orbitDecided) {
                     // Short tap without slop: object picking (Blender
                     // VIEW3D_OT_select behavior at touch scale).

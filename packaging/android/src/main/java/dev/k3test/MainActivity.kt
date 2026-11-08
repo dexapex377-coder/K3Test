@@ -48,7 +48,7 @@ private fun ViewportScreen() {
     var handle by remember { mutableStateOf(0L) }
     var status by remember { mutableStateOf("starting") }
     var autoFrame by remember { mutableStateOf(false) }
-    var moveActive by remember { mutableStateOf(true) }
+    var tool by remember { mutableStateOf(1) }
 
     Box(
         modifier = Modifier
@@ -100,11 +100,11 @@ private fun ViewportScreen() {
                 .displayCutoutPadding()
                 .statusBarsPadding()
                 .padding(start = 4.dp, top = 176.dp),
-            moveActive = moveActive,
-            onMoveToggle = {
-                moveActive = !moveActive
+            tool = tool,
+            onToolChange = { newTool ->
+                tool = newTool
                 if (handle != 0L) {
-                    NativeBridge.nativeSetTool(handle, if (moveActive) 1 else 0)
+                    NativeBridge.nativeSetTool(handle, tool)
                 }
             }
         )
@@ -116,7 +116,7 @@ private fun ViewportScreen() {
         // across surface recreations at zero idle cost.
         while (true) {
             if (handle != 0L) {
-                NativeBridge.nativeSetTool(handle, if (moveActive) 1 else 0)
+                NativeBridge.nativeSetTool(handle, tool)
                 status = NativeBridge.nativeInfo(handle)
             }
             delay(500)
@@ -154,38 +154,85 @@ private fun ViewportScreen() {
 }
 
 /**
- * Left vertical tool bar (top-left, safe-area aware). Only Move ships in
- * this phase; slots for Rotate/Scale stay reserved in the layout but are
- * not drawn as unfinished features.
+ * Left vertical tool bar (top-left, safe-area aware). Ships Move (Figcraft
+ * vector) and Rotate (temporary default icon until the Figcraft export).
  */
 @Composable
 private fun ToolBar(
     modifier: Modifier = Modifier,
-    moveActive: Boolean,
-    onMoveToggle: () -> Unit,
+    tool: Int,
+    onToolChange: (Int) -> Unit,
 ) {
     Column(modifier = modifier) {
-        Box(
-            modifier = Modifier
-                .size(68.dp)
-                .clickable(onClick = onMoveToggle),
-            contentAlignment = androidx.compose.ui.Alignment.Center
-        ) {
-            // Figcraft vector: rounded black background + white arrows.
-            // The drawable owns its background; the blue active outline
-            // hugs the icon with its native 95:77 aspect ratio.
-            Image(
-                painter = painterResource(id = R.drawable.move),
-                contentDescription = "Move tool",
-                contentScale = ContentScale.FillBounds,
+        ToolButton(active = tool == 1, onClick = { onToolChange(if (tool == 1) 0 else 1) }) {
+            MoveToolIcon()
+        }
+        ToolButton(active = tool == 2, onClick = { onToolChange(if (tool == 2) 0 else 2) }) {
+            RotateToolIcon()
+        }
+    }
+}
+
+@Composable
+private fun ToolButton(
+    active: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .padding(bottom = 8.dp)
+            .size(68.dp)
+            .clickable(onClick = onClick),
+        contentAlignment = androidx.compose.ui.Alignment.Center
+    ) {
+        content()
+        if (active) {
+            // Blue active outline hugging the icon bounds.
+            Box(
                 modifier = Modifier
                     .size(64.dp, 52.dp)
-                    .border(
-                        2.dp,
-                        if (moveActive) Color(0xFF4A9BE8) else Color.Transparent,
-                        RoundedCornerShape(14.dp)
-                    )
+                    .border(2.dp, Color(0xFF4A9BE8), RoundedCornerShape(14.dp))
             )
         }
+    }
+}
+
+@Composable
+private fun MoveToolIcon() {
+    // Figcraft vector: rounded black background + white arrows.
+    // The drawable owns its background; the toolbar adds none.
+    Image(
+        painter = painterResource(id = R.drawable.move),
+        contentDescription = "Move tool",
+        contentScale = ContentScale.FillBounds,
+        modifier = Modifier.size(64.dp, 52.dp)
+    )
+}
+
+/** Temporary default Rotate icon (double curved arrow) pending Figcraft export. */
+@Composable
+private fun RotateToolIcon() {
+    Canvas(modifier = Modifier.size(64.dp, 52.dp)) {
+        drawArc(
+            color = Color(0xFFD9D9D9),
+            startAngle = 20f,
+            sweepAngle = 240f,
+            useCenter = false,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 6f,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        )
+        drawArc(
+            color = Color(0xFFD9D9D9),
+            startAngle = 200f,
+            sweepAngle = 240f,
+            useCenter = false,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 6f,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        )
     }
 }
