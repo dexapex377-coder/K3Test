@@ -35,10 +35,10 @@ use raw_window_handle::{
 };
 use wgpu::util::DeviceExt;
 
-pub mod editor;
+pub mod tools;
 pub mod scene;
 
-use editor::{Editor, Tool};
+use tools::{Editor, Tool};
 use scene::Scene;
 
 const VERTEX_SHADER: &str = r"
@@ -488,18 +488,18 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
     let active = editor
         .rotate_dragging
         .and_then(|drag| match drag.kind {
-            editor::RotateKind::Axis(axis) => Some(axis.index()),
-            editor::RotateKind::Trackball => None,
+            tools::RotateKind::Axis(axis) => Some(axis.index()),
+            tools::RotateKind::Trackball => None,
         });
     const SIDES: usize = 6;
     const TUBE_RADIUS: f32 = 0.07;
     for (index, color) in colors.iter().enumerate() {
         let axis = match index {
-            0 => editor::Axis::X,
-            1 => editor::Axis::Y,
-            _ => editor::Axis::Z,
+            0 => tools::Axis::X,
+            1 => tools::Axis::Y,
+            _ => tools::Axis::Z,
         };
-        let kind = editor::RotateKind::Axis(axis);
+        let kind = tools::RotateKind::Axis(axis);
         let direction = axis.direction();
         let u = if direction == glam::Vec3::Z {
             glam::Vec3::X
@@ -512,7 +512,7 @@ fn build_rotate_arcs(center: glam::Vec3, editor: &Editor) -> Vec<Vertex> {
         } else {
             *color * 0.85
         };
-        let points = editor::ring_points(center, kind, 48);
+        let points = tools::ring_points(center, kind, 48);
         let mut rings = Vec::with_capacity(points.len());
         for point in points {
             let mut ring = [glam::Vec3::ZERO; SIDES];
@@ -1363,7 +1363,7 @@ impl Renderer {
                 Tool::Move => editor
                     .selected
                     .and_then(|index| scene.position(index))
-                    .map(editor::build_gizmo_vertices)
+                    .map(tools::build_gizmo_vertices)
                     .unwrap_or_default(),
                 Tool::Rotate => editor
                     .selected
@@ -1446,7 +1446,7 @@ impl Renderer {
         let forward = (camera.target - eye).normalize();
         let right = forward.cross(WORLD_UP).normalize();
         let up = right.cross(forward).normalize();
-        let radius = editor::ROTATE_RING_RADIUS;
+        let radius = tools::ROTATE_RING_RADIUS;
         // White trackball ring.
         let steps = 48;
         for i in 0..steps {
